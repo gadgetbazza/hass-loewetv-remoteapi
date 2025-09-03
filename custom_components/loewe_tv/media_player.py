@@ -4,9 +4,9 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
 from homeassistant.const import STATE_OFF, STATE_ON
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import DOMAIN
 from .coordinator import LoeweTVCoordinator
@@ -28,7 +28,7 @@ SUPPORT_LOEWE = (
 )
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
+async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
     coordinator: LoeweTVCoordinator = hass.data[DOMAIN][entry.entry_id]
     name = entry.data["name"]
     async_add_entities([LoeweTVMediaPlayer(coordinator, name)], True)
@@ -43,9 +43,22 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         self._coordinator = coordinator
 
     @property
+    def unique_id(self) -> str:
+        return f"{self._coordinator.host}_media_player"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._coordinator.host)},
+            name=self._attr_name,
+            manufacturer="Loewe",
+            model="Bild TV",
+            sw_version="Remote API",
+        )
+
+    @property
     def state(self):
         state = self._coordinator.data.get("state")
-        # coordinator stores 'on'/'off' for simplicity
         return STATE_ON if state == "on" else STATE_OFF
 
     @property

@@ -6,7 +6,7 @@ from .coordinator import LoeweTVCoordinator
 
 
 async def async_setup(hass: HomeAssistant, config: dict):
-    """Set up Loewe TV from YAML (deprecated)."""
+    """Set up Loewe TV (YAML not supported)."""
     return True
 
 

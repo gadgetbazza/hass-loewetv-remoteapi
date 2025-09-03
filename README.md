@@ -25,3 +25,20 @@ Add the integration via **Settings → Devices & Services → Add Integration �
 You'll be asked for:
 - Host (IP address)
 - Name (optional)
+
+## Custom Logo in Lovelace
+This integration provides default branding (icon + logo) for the Devices & Services view.  
+If you’d like to display your **custom Loewe logo** in the dashboard instead of the default MDI television icon, you can use a `picture-entity` card.
+
+1. Copy your `logo.png` into your Home Assistant `www` folder, e.g.:  
+   `<config>/www/loewe/logo.png`
+
+2. Reference it in Lovelace using the `/local/` path:
+
+```yaml
+type: picture-entity
+entity: media_player.loewe_tv
+image: /local/loewe/logo.png
+```
+
+This will show the Loewe logo instead of the default MDI icon in your dashboard card.

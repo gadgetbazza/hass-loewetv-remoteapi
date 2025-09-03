@@ -5,10 +5,7 @@ from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
 from homeassistant.const import STATE_OFF
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-    UpdateFailed,
-)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 _LOGGER = logging.getLogger(__name__)
 
