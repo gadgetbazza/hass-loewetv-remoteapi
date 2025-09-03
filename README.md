@@ -12,7 +12,7 @@ A custom Home Assistant integration to control **Loewe Bild TVs** via their SOAP
 
 ## Installation (HACS)
 1. Go to **HACS → Integrations → Custom Repositories**.
-2. Add: `https://github.com/yourname/loewe_tv` with type **Integration**.
+2. Add: `https://github.com/gadgetbazza/hass-loewetv-remoteapi` with type **Integration**.
 3. Install **Loewe TV**.
 4. Restart Home Assistant.
 
