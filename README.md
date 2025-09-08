@@ -1,14 +1,14 @@
-# Loewe TV Integration for Home Assistant
+# Loewe TV Remote API (Home Assistant)
 
-A custom Home Assistant integration to control **Loewe Bild TVs** via their SOAP Remote API.
+Custom integration for Loewe Bild/SL420-era TVs using the Remote API via SOAP over HTTP.
 
 ## Features
-- Power on/off
-- Volume control (set, step, mute)
-- Dynamic input source discovery (HDMI/AV)
-- TV channel browsing (auto-discovered)
-- App launching (Netflix, YouTube, etc.)
-- Extra attributes: current channel, app, and input
+- UI setup (config flow)
+- Pairing (RequestAccess) with client caching
+- DataUpdateCoordinator polling (`GetCurrentStatus`, `GetCurrentService`)
+- Media player: volume step, RC-key injection
+- Sensors: Standby State, Current Source, HDR Player State
+- Diagnostics
 
 ## Installation (HACS)
 1. Go to **HACS → Integrations → Custom Repositories**.
@@ -17,28 +17,18 @@ A custom Home Assistant integration to control **Loewe Bild TVs** via their SOAP
 4. Restart Home Assistant.
 
 ## Manual Installation
-Copy `custom_components/loewe_tv` to your Home Assistant `custom_components` folder.
+1. Copy `custom_components/loewe_tv` into your Home Assistant `config/custom_components/` folder.
+2. Restart Home Assistant.
+3. Add integration: **Settings → Devices & Services → Add Integration → Loewe TV Remote API**.
 
-## Configuration
-Add the integration via **Settings → Devices & Services → Add Integration → Loewe TV**.
-
-You'll be asked for:
-- Host (IP address)
-- Name (optional)
-
-## Custom Logo in Lovelace
-This integration provides default branding (icon + logo) for the Devices & Services view.  
-If you’d like to display your **custom Loewe logo** in the dashboard instead of the default MDI television icon, you can use a `picture-entity` card.
-
-1. Copy your `logo.png` into your Home Assistant `www` folder, e.g.:  
-   `<config>/www/loewe/logo.png`
-
-2. Reference it in Lovelace using the `/local/` path:
-
+## Logging (optional)
 ```yaml
-type: picture-entity
-entity: media_player.loewe_tv
-image: /local/loewe/logo.png
+logger:
+  default: info
+  logs:
+    custom_components.loewe_tv: debug
 ```
 
-This will show the Loewe logo instead of the default MDI icon in your dashboard card.
+## Notes
+- The TV may require `RequestAccess` after power cycles. The integration retries in the background.
+- Resource path defaults to `/loewe_tablet_0001`.

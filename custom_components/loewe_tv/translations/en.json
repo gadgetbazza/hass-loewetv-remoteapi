@@ -2,10 +2,11 @@
   "config": {
     "step": {
       "user": {
-        "title": "Add Loewe TV",
+        "title": "Loewe TV",
+        "description": "Enter TV IP and resource path",
         "data": {
-          "host": "Host",
-          "name": "Name"
+          "host": "TV IP address",
+          "resource_path": "Resource path (usually /loewe_tablet_0001)"
         }
       }
     },

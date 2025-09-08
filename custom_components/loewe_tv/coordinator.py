@@ -1,174 +1,212 @@
+from __future__ import annotations
 import logging
-import xml.etree.ElementTree as ET
-import aiohttp
 from datetime import timedelta
+import asyncio
+from typing import Optional, Dict, Any
+
+import aiohttp
+import xml.etree.ElementTree as ET
 
 from homeassistant.core import HomeAssistant
-from homeassistant.const import STATE_OFF
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .const import (
+    DEFAULT_RESOURCE_PATH,
+    DEFAULT_SCAN_INTERVAL,
+    TRANSPORT_AUTO,
+    TRANSPORT_SOAP,
+    TRANSPORT_UPNP,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-SOAP_URL = "http://{host}:905/LOEWE/RemoteService"
-SOAP_NS = "urn:loewe-remote:service:Remote:1"
+SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
+LTV_NS = "urn:loewe.de:RemoteTV:Tablet"
 
+def _ns(tag: str, ns: str) -> str:
+    return f"{{{ns}}}{tag}"
 
-class LoeweTVCoordinator(DataUpdateCoordinator):
-    """Coordinator to manage Loewe TV polling and SOAP requests."""
+class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
+    """Coordinator for Loewe TV SOAP/UPnP control."""
 
-    def __init__(self, hass: HomeAssistant, host: str):
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        resource_path: str = DEFAULT_RESOURCE_PATH,
+        client_id: Optional[str] = None,
+        device_uuid: Optional[str] = None,
+        control_transport: str = TRANSPORT_SOAP,
+        update_interval: float = DEFAULT_SCAN_INTERVAL,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
-            name="LoeweTVCoordinator",
-            update_interval=timedelta(seconds=10),
+            name="Loewe TV",
+            update_interval=timedelta(seconds=update_interval),
         )
-        self._host = host
-        self._volume = 0.0
-        self._muted = False
-        self._state = STATE_OFF
-        self._source = None
-        self._attr_channel = None
-        self._attr_app = None
-        self._attr_input = None
-        self._input_map = {}
-        self._channel_map = {}
-        self._app_map = {}
+        self.host = host
+        self.resource_path = resource_path or DEFAULT_RESOURCE_PATH
+        self.base_url = f"http://{self.host}:905{self.resource_path}"
+        self.sunny_base = f"http://{self.host}:1543/sunny"
+        self.client_id: Optional[str] = client_id
+        self.device_uuid = device_uuid
+        self.control_transport = control_transport
+        self._session: Optional[aiohttp.ClientSession] = None
+        self.device_name: Optional[str] = None
+        self._fcid = 1
+        self._device_info: Dict[str, Any] = {}
 
-    @property
-    def host(self) -> str:
-        return self._host
+    async def _session_get(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=10)
+            self._session = aiohttp.ClientSession(timeout=timeout)
+        return self._session
 
-    async def _soap_request(self, action: str, body_xml: str) -> str | None:
-        url = SOAP_URL.format(host=self._host)
-        headers = {"Content-Type": "text/xml; charset=utf-8"}
-        envelope = f"""
-        <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
-          <s:Body>
-            <m:{action} xmlns:m="{SOAP_NS}">
-              {body_xml}
-            </m:{action}>
-          </s:Body>
-        </s:Envelope>
-        """
+    def _next_fcid(self) -> int:
+        self._fcid += 1
+        return self._fcid
+
+    def _envelope(self, inner: str) -> str:
+        return f'<s:Envelope xmlns:s="{SOAP_NS}"><s:Body>{inner}</s:Body></s:Envelope>'
+
+    async def _soap(self, action: str, inner_xml: str, timeout: float = 8.0) -> Optional[str]:
+        session = await self._session_get()
+        data = self._envelope(inner_xml).encode("utf-8")
+        headers = {
+            "Accept": "*/*",
+            "Accept-Encoding": "deflate, gzip",
+            "Content-Type": "text/xml; charset=utf-8",
+            "SOAPAction": action,
+        }
+        _LOGGER.debug(
+            "SOAP request to %s (Action=%s):\nHeaders: %s\nBody:\n%s",
+            self.base_url, action, headers, data.decode("utf-8"),
+        )
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, data=envelope, headers=headers, timeout=5) as resp:
-                    if resp.status == 200:
-                        return await resp.text()
-                    _LOGGER.debug("SOAP %s HTTP %s", action, resp.status)
-        except Exception as err:
-            _LOGGER.warning("SOAP %s exception: %s", action, err)
-        return None
+            async with session.post(self.base_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                text = await resp.text()
+                _LOGGER.debug("SOAP response %s: %s", resp.status, text[:800])
+                if resp.status != 200:
+                    return None
+                return text
+        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+            _LOGGER.debug("SOAP client error: %s", ex)
+            return None
 
-    async def send_rc_key(self, key_code: int):
-        await self._soap_request("InjectRCKey", f"<Key>{key_code}</Key>")
-
-    async def async_update_data(self):
-        """Fetch state from the Loewe TV."""
+    async def _upnp_control(self, service: str, action: str, inner_xml: str, timeout: float = 8.0) -> Optional[str]:
+        url = f"{self.sunny_base}/{service}/control"
+        session = await self._session_get()
+        soap_body = f'<s:Envelope xmlns:s="{SOAP_NS}"><s:Body><u:{action} xmlns:u="urn:loewe.de:service:{service}:1">{inner_xml}</u:{action}></s:Body></s:Envelope>'
+        headers = {
+            'Content-Type': 'text/xml; charset="utf-8"',
+            'SOAPACTION': f'urn:loewe.de:service:{service}:1#{action}'
+        }
+        _LOGGER.debug("UPnP request to %s (Action=%s):\nHeaders: %s\nBody:\n%s", url, action, headers, soap_body)
         try:
-            # Volume
-            resp = await self._soap_request("GetVolume", "")
-            if resp:
-                root = ET.fromstring(resp)
-                vol_elem = root.find(".//CurrentVolume")
-                if vol_elem is not None and vol_elem.text is not None:
-                    raw = int(vol_elem.text)
-                    self._volume = max(0.0, min(1.0, raw / 999999))
+            async with session.post(url, data=soap_body.encode('utf-8'), headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                text = await resp.text()
+                _LOGGER.debug("UPnP response %s: %s", resp.status, text[:800])
+                if resp.status != 200:
+                    return None
+                return text
+        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
+            _LOGGER.debug("UPnP client error: %s", ex)
+            return None
 
-            # Mute
-            resp = await self._soap_request("GetMute", "")
-            if resp:
-                root = ET.fromstring(resp)
-                mute_elem = root.find(".//Mute")
-                if mute_elem is not None and mute_elem.text is not None:
-                    self._muted = mute_elem.text == "1"
+    def _parse_map(self, xml_text: str) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        try:
+            root = ET.fromstring(xml_text)
+            body = root.find(_ns("Body", SOAP_NS))
+            if body is None:
+                return out
+            for resp in body:
+                for child in resp:
+                    tag = child.tag.split("}")[-1]
+                    out[tag] = (child.text or "").strip()
+        except ET.ParseError:
+            _LOGGER.debug("Failed to parse SOAP XML")
+        return out
 
-            # Discover once
-            if not self._input_map:
-                await self._refresh_inputs()
-            if not self._channel_map:
-                await self._refresh_channels()
-            if not self._app_map:
-                await self._refresh_apps()
+    async def async_request_access(self) -> Optional[Dict[str, str]]:
+        fcid = 8138941
+        inner = (
+            f'<ltv:RequestAccess xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>?</ltv:ClientId>"
+            f"<ltv:DeviceType>Home Assistant</ltv:DeviceType>"
+            f"<ltv:DeviceName>Loewe TV</ltv:DeviceName>"
+            f"<ltv:DeviceUUID>ha-{self.host}</ltv:DeviceUUID>"
+            f"<ltv:RequesterName>HA Loewe Integration</ltv:RequesterName>"
+            f"</ltv:RequestAccess>"
+        )
+        xml = await self._soap("RequestAccess", inner)
+        if not xml:
+            return None
+        parsed = self._parse_map(xml)
+        client = parsed.get("ClientId")
+        if client:
+            self.client_id = client
+        _LOGGER.debug("RequestAccess: %s", parsed)
+        return parsed
 
-            # Current media
-            resp = await self._soap_request("GetCurrentMedia", "")
-            if resp:
-                root = ET.fromstring(resp)
-                name_elem = root.find(".//Name")
-                uuid_elem = root.find(".//Uuid")
-                if name_elem is not None and uuid_elem is not None:
-                    name = (name_elem.text or "").strip()
-                    uuid = (uuid_elem.text or "").strip()
-                    self._source = name
-                    if uuid in self._input_map.values():
-                        self._attr_input = name
-                    elif uuid in self._channel_map.values():
-                        self._attr_channel = name
-                    elif uuid in self._app_map.values():
-                        self._attr_app = name
+    async def async_get_device_data(self) -> Optional[Dict[str, str]]:
+        fcid = 8138942
+        inner = f'<ltv:GetDeviceData xmlns:ltv="{LTV_NS}"><ltv:fcid>{fcid}</ltv:fcid><ltv:ClientId>{self.client_id or ""}</ltv:ClientId></ltv:GetDeviceData>'
+        xml = await self._soap("GetDeviceData", inner)
+        if not xml:
+            return None
+        parsed = self._parse_map(xml)
+        if parsed:
+            self._device_info = parsed
+            self.device_name = parsed.get("NetworkHostName") or parsed.get("StreamingServerName") or "Loewe TV"
+        return parsed
 
-            return {
-                "volume": self._volume,
-                "muted": self._muted,
-                "state":  "on" if self._source else "off",
-                "source": self._source,
-                "channel": self._attr_channel,
-                "app": self._attr_app,
-                "input": self._attr_input,
-                "inputs": self._input_map,
-                "channels": self._channel_map,
-                "apps": self._app_map,
-            }
+    async def async_get_current_status(self) -> Optional[Dict[str, str]]:
+        fcid = self._next_fcid()
+        inner = f'<ltv:GetCurrentStatus xmlns:ltv="{LTV_NS}"><ltv:fcid>{fcid}</ltv:fcid><ltv:ClientId>{self.client_id or ""}</ltv:ClientId></ltv:GetCurrentStatus>'
+        xml = await self._soap("GetCurrentStatus", inner)
+        if not xml:
+            return None
+        return self._parse_map(xml)
 
-        except Exception as err:
-            raise UpdateFailed(f"Error updating Loewe TV: {err}") from err
+    async def async_inject_rc_key(self, code: int) -> bool:
+        fcid = self._next_fcid()
+        inner = (
+            f'<ltv:InjectRCKey xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id or ''}</ltv:ClientId>"
+            f"<ltv:InputEventSequence><ltv:RCKeyEvent alphabet=\"l2700\" value=\"{code}\" mode=\"press\"/>"
+            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{code}\" mode=\"release\"/></ltv:InputEventSequence>"
+            f"</ltv:InjectRCKey>"
+        )
+        xml = await self._soap("InjectRCKey", inner)
+        if xml:
+            return True
 
-    async def _refresh_inputs(self):
-        resp = await self._soap_request("GetListOfMedia", "")
-        if not resp:
-            return
-        root = ET.fromstring(resp)
-        for media in root.findall(".//Media"):
-            name_elem = media.find("Name")
-            uuid_elem = media.find("Uuid")
-            if name_elem is not None and uuid_elem is not None:
-                name = (name_elem.text or "").strip()
-                uuid = (uuid_elem.text or "").strip()
-                if name:
-                    self._input_map[name] = uuid
+        if self.control_transport in (TRANSPORT_AUTO, TRANSPORT_UPNP):
+            body = f'<InputEventSequence><RCKeyEvent alphabet="l2700" value="{code}" mode="press"/><RCKeyEvent alphabet="l2700" value="{code}" mode="release"/></InputEventSequence>'
+            upnp = await self._upnp_control("X_RemoteControl", "InjectRCKey", body)
+            return upnp is not None
 
-    async def _refresh_channels(self):
-        resp = await self._soap_request("GetListOfChannelLists", "")
-        if not resp:
-            return
-        root = ET.fromstring(resp)
-        list_uuids = [e.text for e in root.findall(".//Uuid") if e.text]
-        for list_uuid in list_uuids:
-            resp = await self._soap_request("GetChannelList", f"<Uuid>{list_uuid}</Uuid>")
-            if not resp:
-                continue
-            r2 = ET.fromstring(resp)
-            for chan in r2.findall(".//Channel"):
-                name_elem = chan.find("Name")
-                uuid_elem = chan.find("Uuid")
-                if name_elem is not None and uuid_elem is not None:
-                    name = (name_elem.text or "").strip()
-                    uuid = (uuid_elem.text or "").strip()
-                    if name:
-                        self._channel_map[name] = uuid
+        return False
 
-    async def _refresh_apps(self):
-        resp = await self._soap_request("GetApplicationList", "")
-        if not resp:
-            return
-        root = ET.fromstring(resp)
-        for app in root.findall(".//Application"):
-            name_elem = app.find("Name")
-            uuid_elem = app.find("Uuid")
-            if name_elem is not None and uuid_elem is not None:
-                name = (name_elem.text or "").strip()
-                uuid = (uuid_elem.text or "").strip()
-                if name:
-                    self._app_map[name] = uuid
+    async def async_test_connection(self) -> tuple[bool, dict]:
+        dev = await self.async_get_device_data()
+        if not dev:
+            return (False, {})
+        return (True, dev)
+
+    async def _async_update_data(self) -> dict:
+        if not self.client_id:
+            await self.async_request_access()
+        status = await self.async_get_current_status()
+        return {
+            "device": self._device_info,
+            "status": status or {},
+        }
+
+    async def async_close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()

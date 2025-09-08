@@ -1,122 +1,57 @@
+from __future__ import annotations
 import logging
-from homeassistant.components.media_player import (
-    MediaPlayerEntity,
-    MediaPlayerEntityFeature,
-)
+from homeassistant.components.media_player import MediaPlayerEntity, MediaPlayerDeviceClass, SUPPORT_VOLUME_SET, SUPPORT_VOLUME_STEP, SUPPORT_TURN_ON, SUPPORT_TURN_OFF
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_OFF, STATE_ON
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
 from .coordinator import LoeweTVCoordinator
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-RC_KEY_POWER_ON = 22
-RC_KEY_POWER_OFF = 25
-RC_KEY_VOL_UP = 21
-RC_KEY_VOL_DOWN = 20
-
-SUPPORT_LOEWE = (
-    MediaPlayerEntityFeature.TURN_ON
-    | MediaPlayerEntityFeature.TURN_OFF
-    | MediaPlayerEntityFeature.VOLUME_SET
-    | MediaPlayerEntityFeature.VOLUME_STEP
-    | MediaPlayerEntityFeature.VOLUME_MUTE
-    | MediaPlayerEntityFeature.SELECT_SOURCE
-)
-
-
-async def async_setup_entry(hass, entry: ConfigEntry, async_add_entities):
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     coordinator: LoeweTVCoordinator = hass.data[DOMAIN][entry.entry_id]
-    name = entry.data["name"]
-    async_add_entities([LoeweTVMediaPlayer(coordinator, name)], True)
+    async_add_entities([LoeweMediaPlayer(coordinator, entry.entry_id)])
 
+class LoeweMediaPlayer(MediaPlayerEntity):
+    _attr_device_class = MediaPlayerDeviceClass.TV
+    _attr_should_poll = False
 
-class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
-    """Representation of the Loewe TV as a MediaPlayer entity."""
-
-    def __init__(self, coordinator: LoeweTVCoordinator, name: str):
-        super().__init__(coordinator)
-        self._attr_name = name
-        self._coordinator = coordinator
-
-    @property
-    def unique_id(self) -> str:
-        return f"{self._coordinator.host}_media_player"
+    def __init__(self, coordinator: LoeweTVCoordinator, entry_id: str) -> None:
+        self.coordinator = coordinator
+        self._entry_id = entry_id
+        self._attr_name = self.coordinator.device_name or "Loewe TV"
+        self._attr_unique_id = f"{entry_id}_media"
+        self._state = None
 
     @property
-    def device_info(self) -> DeviceInfo:
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._coordinator.host)},
-            name=self._attr_name,
-            manufacturer="Loewe",
-            model="Bild TV",
-            sw_version="Remote API",
-        )
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._entry_id)},
+            "name": self.coordinator.device_name or "Loewe TV",
+            "manufacturer": "Loewe",
+            "model": self.coordinator._device_info.get("Chassis", "Unknown"),
+        }
 
     @property
     def state(self):
-        state = self._coordinator.data.get("state")
-        return STATE_ON if state == "on" else STATE_OFF
+        return self._state
 
     @property
     def supported_features(self):
-        return SUPPORT_LOEWE
+        return SUPPORT_VOLUME_STEP | SUPPORT_TURN_ON | SUPPORT_TURN_OFF
 
-    @property
-    def volume_level(self):
-        return self._coordinator.data.get("volume", 0.0)
+    async def async_volume_up(self) -> None:
+        await self.coordinator.async_inject_rc_key(21)
 
-    @property
-    def is_volume_muted(self):
-        return self._coordinator.data.get("muted", False)
+    async def async_volume_down(self) -> None:
+        await self.coordinator.async_inject_rc_key(20)
 
-    @property
-    def source(self):
-        return self._coordinator.data.get("source")
+    async def async_turn_on(self) -> None:
+        await self.coordinator.async_inject_rc_key(22)
+        self._state = "on"
 
-    @property
-    def source_list(self):
-        return list(self._coordinator.data.get("inputs", {})) +                    list(self._coordinator.data.get("channels", {})) +                    list(self._coordinator.data.get("apps", {}))
-
-    @property
-    def extra_state_attributes(self):
-        return {
-            "current_channel": self._coordinator.data.get("channel"),
-            "current_app": self._coordinator.data.get("app"),
-            "current_input": self._coordinator.data.get("input"),
-            "host": self._coordinator.host,
-        }
-
-    # --- Commands ---
-    async def async_turn_on(self):
-        await self._coordinator.send_rc_key(RC_KEY_POWER_ON)
-
-    async def async_turn_off(self):
-        await self._coordinator.send_rc_key(RC_KEY_POWER_OFF)
-
-    async def async_volume_up(self):
-        await self._coordinator.send_rc_key(RC_KEY_VOL_UP)
-
-    async def async_volume_down(self):
-        await self._coordinator.send_rc_key(RC_KEY_VOL_DOWN)
-
-    async def async_set_volume_level(self, volume: float):
-        loewe_val = max(0, min(999999, int(volume * 999999)))
-        await self._coordinator._soap_request("SetVolume", f"<Value>{loewe_val}</Value>")
-
-    async def async_mute_volume(self, mute: bool):
-        await self._coordinator._soap_request("SetMute", f"<Value>{1 if mute else 0}</Value>")
-
-    async def async_select_source(self, source: str):
-        if source in self._coordinator._input_map:
-            uuid = self._coordinator._input_map[source]
-            await self._coordinator._soap_request("ZapToMedia", f"<Uuid>{uuid}</Uuid>")
-        elif source in self._coordinator._channel_map:
-            uuid = self._coordinator._channel_map[source]
-            await self._coordinator._soap_request("ZapToMedia", f"<Uuid>{uuid}</Uuid>")
-        elif source in self._coordinator._app_map:
-            uuid = self._coordinator._app_map[source]
-            await self._coordinator._soap_request("ZapToApplication", f"<Uuid>{uuid}</Uuid>")
+    async def async_turn_off(self) -> None:
+        await self.coordinator.async_inject_rc_key(25)
+        self._state = "off"
