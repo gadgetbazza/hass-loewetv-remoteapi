@@ -13,9 +13,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .const import (
     DEFAULT_RESOURCE_PATH,
     DEFAULT_SCAN_INTERVAL,
-    TRANSPORT_AUTO,
     TRANSPORT_SOAP,
-    TRANSPORT_UPNP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -23,11 +21,13 @@ _LOGGER = logging.getLogger(__name__)
 SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 LTV_NS = "urn:loewe.de:RemoteTV:Tablet"
 
+
 def _ns(tag: str, ns: str) -> str:
     return f"{{{ns}}}{tag}"
 
+
 class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
-    """Coordinator for Loewe TV SOAP/UPnP control."""
+    """Coordinator for Loewe TV SOAP control."""
 
     def __init__(
         self,
@@ -46,9 +46,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
             update_interval=timedelta(seconds=update_interval),
         )
         self.host = host
-        self.resource_path = resource_path or DEFAULT_RESOURCE_PATH
+        self.resource_path = (resource_path or DEFAULT_RESOURCE_PATH).rstrip("/")
         self.base_url = f"http://{self.host}:905{self.resource_path}"
-        self.sunny_base = f"http://{self.host}:1543/sunny"
         self.client_id: Optional[str] = client_id
         self.device_uuid = device_uuid
         self.control_transport = control_transport
@@ -57,9 +56,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
         self._fcid = 1
         self._device_info: Dict[str, Any] = {}
 
+    # ---- HTTP/SOAP helpers --------------------------------------------------
+
     async def _session_get(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=10)
+            timeout = aiohttp.ClientTimeout(total=12)
             self._session = aiohttp.ClientSession(timeout=timeout)
         return self._session
 
@@ -70,48 +71,32 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
     def _envelope(self, inner: str) -> str:
         return f'<s:Envelope xmlns:s="{SOAP_NS}"><s:Body>{inner}</s:Body></s:Envelope>'
 
-    async def _soap(self, action: str, inner_xml: str, timeout: float = 8.0) -> Optional[str]:
+    async def _soap(self, action: str, inner_xml: str, timeout: float = 10.0) -> Optional[str]:
         session = await self._session_get()
         data = self._envelope(inner_xml).encode("utf-8")
+
+        # Loewe TVs (your firmware) want bare SOAPAction for *all* calls
         headers = {
             "Accept": "*/*",
             "Accept-Encoding": "deflate, gzip",
             "Content-Type": "text/xml; charset=utf-8",
             "SOAPAction": action,
         }
-        _LOGGER.debug(
-            "SOAP request to %s (Action=%s):\nHeaders: %s\nBody:\n%s",
-            self.base_url, action, headers, data.decode("utf-8"),
-        )
-        try:
-            async with session.post(self.base_url, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-                text = await resp.text()
-                _LOGGER.debug("SOAP response %s: %s", resp.status, text[:800])
-                if resp.status != 200:
-                    return None
-                return text
-        except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
-            _LOGGER.debug("SOAP client error: %s", ex)
-            return None
 
-    async def _upnp_control(self, service: str, action: str, inner_xml: str, timeout: float = 8.0) -> Optional[str]:
-        url = f"{self.sunny_base}/{service}/control"
-        session = await self._session_get()
-        soap_body = f'<s:Envelope xmlns:s="{SOAP_NS}"><s:Body><u:{action} xmlns:u="urn:loewe.de:service:{service}:1">{inner_xml}</u:{action}></s:Body></s:Envelope>'
-        headers = {
-            'Content-Type': 'text/xml; charset="utf-8"',
-            'SOAPACTION': f'urn:loewe.de:service:{service}:1#{action}'
-        }
-        _LOGGER.debug("UPnP request to %s (Action=%s):\nHeaders: %s\nBody:\n%s", url, action, headers, soap_body)
         try:
-            async with session.post(url, data=soap_body.encode('utf-8'), headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            async with session.post(
+                self.base_url,
+                data=data,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
                 text = await resp.text()
-                _LOGGER.debug("UPnP response %s: %s", resp.status, text[:800])
                 if resp.status != 200:
+                    _LOGGER.debug("SOAP non-200 (%s) for %s: %s", resp.status, action, text[:400])
                     return None
                 return text
         except (aiohttp.ClientError, asyncio.TimeoutError) as ex:
-            _LOGGER.debug("UPnP client error: %s", ex)
+            _LOGGER.debug("SOAP client error for %s: %s", action, ex)
             return None
 
     def _parse_map(self, xml_text: str) -> Dict[str, str]:
@@ -129,7 +114,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.debug("Failed to parse SOAP XML")
         return out
 
+    # ---- API calls ----------------------------------------------------------
+
     async def async_request_access(self) -> Optional[Dict[str, str]]:
+        """Perform RequestAccess handshake."""
         fcid = 8138941
         inner = (
             f'<ltv:RequestAccess xmlns:ltv="{LTV_NS}">'
@@ -148,64 +136,151 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict]):
         client = parsed.get("ClientId")
         if client:
             self.client_id = client
-        _LOGGER.debug("RequestAccess: %s", parsed)
+            _LOGGER.debug("Obtained ClientId: %s", client)
         return parsed
 
     async def async_get_device_data(self) -> Optional[Dict[str, str]]:
-        fcid = 8138942
-        inner = f'<ltv:GetDeviceData xmlns:ltv="{LTV_NS}"><ltv:fcid>{fcid}</ltv:fcid><ltv:ClientId>{self.client_id or ""}</ltv:ClientId></ltv:GetDeviceData>'
+        if not self.client_id:
+            return None
+        fcid = self._next_fcid()
+        inner = (
+            f'<ltv:GetDeviceData xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"</ltv:GetDeviceData>"
+        )
         xml = await self._soap("GetDeviceData", inner)
         if not xml:
             return None
         parsed = self._parse_map(xml)
         if parsed:
             self._device_info = parsed
-            self.device_name = parsed.get("NetworkHostName") or parsed.get("StreamingServerName") or "Loewe TV"
+            self.device_name = (
+                parsed.get("NetworkHostName")
+                or parsed.get("StreamingServerName")
+                or "Loewe TV"
+            )
         return parsed
 
     async def async_get_current_status(self) -> Optional[Dict[str, str]]:
+        if not self.client_id:
+            return None
         fcid = self._next_fcid()
-        inner = f'<ltv:GetCurrentStatus xmlns:ltv="{LTV_NS}"><ltv:fcid>{fcid}</ltv:fcid><ltv:ClientId>{self.client_id or ""}</ltv:ClientId></ltv:GetCurrentStatus>'
+        inner = (
+            f'<ltv:GetCurrentStatus xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"</ltv:GetCurrentStatus>"
+        )
         xml = await self._soap("GetCurrentStatus", inner)
         if not xml:
             return None
         return self._parse_map(xml)
 
+    async def async_get_volume(self) -> Optional[int]:
+        if not self.client_id:
+            return None
+        fcid = self._next_fcid()
+        inner = (
+            f'<ltv:GetVolume xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"</ltv:GetVolume>"
+        )
+        xml = await self._soap("GetVolume", inner)
+        if not xml:
+            return None
+        parsed = self._parse_map(xml)
+        try:
+            return int(parsed.get("Value", ""))
+        except Exception:
+            return None
+
+    async def async_set_volume(self, value: int) -> bool:
+        if not self.client_id:
+            return False
+        fcid = self._next_fcid()
+        inner = (
+            f'<ltv:SetVolume xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"<ltv:Value>{value}</ltv:Value>"
+            f"</ltv:SetVolume>"
+        )
+        xml = await self._soap("SetVolume", inner)
+        if not xml:
+            return False
+        parsed = self._parse_map(xml)
+        return "Value" in parsed
+
+    async def async_get_mute(self) -> Optional[bool]:
+        if not self.client_id:
+            return None
+        fcid = self._next_fcid()
+        inner = (
+            f'<ltv:GetMute xmlns:ltv="{LTV_NS}">'
+            f"<ltv:fcid>{fcid}</ltv:fcid>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"</ltv:GetMute>"
+        )
+        xml = await self._soap("GetMute", inner)
+        if not xml:
+            return None
+        parsed = self._parse_map(xml)
+        val = (parsed.get("Value") or "").strip().lower()
+        return val in ("1", "true", "on")
+
     async def async_inject_rc_key(self, code: int) -> bool:
+        if not self.client_id:
+            return False
         fcid = self._next_fcid()
         inner = (
             f'<ltv:InjectRCKey xmlns:ltv="{LTV_NS}">'
             f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id or ''}</ltv:ClientId>"
-            f"<ltv:InputEventSequence><ltv:RCKeyEvent alphabet=\"l2700\" value=\"{code}\" mode=\"press\"/>"
-            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{code}\" mode=\"release\"/></ltv:InputEventSequence>"
+            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
+            f"<ltv:InputEventSequence>"
+            f'<ltv:RCKeyEvent alphabet="l2700" mode="press" value="{code}"/>'
+            f'<ltv:RCKeyEvent alphabet="l2700" mode="release" value="{code}"/>'
+            f"</ltv:InputEventSequence>"
             f"</ltv:InjectRCKey>"
         )
         xml = await self._soap("InjectRCKey", inner)
-        if xml:
-            return True
+        return bool(xml)
 
-        if self.control_transport in (TRANSPORT_AUTO, TRANSPORT_UPNP):
-            body = f'<InputEventSequence><RCKeyEvent alphabet="l2700" value="{code}" mode="press"/><RCKeyEvent alphabet="l2700" value="{code}" mode="release"/></InputEventSequence>'
-            upnp = await self._upnp_control("X_RemoteControl", "InjectRCKey", body)
-            return upnp is not None
-
-        return False
+    # ---- Config flow hook ---------------------------------------------------
 
     async def async_test_connection(self) -> tuple[bool, dict]:
-        dev = await self.async_get_device_data()
-        if not dev:
-            return (False, {})
-        return (True, dev)
+        """Validate connectivity & obtain ClientId if possible."""
+        # Try RequestAccess if we don't have one
+        if not self.client_id:
+            await self.async_request_access()
+        if self.client_id:
+            dev = await self.async_get_device_data()
+            if dev:
+                return True, dev
+            status = await self.async_get_current_status()
+            if status:
+                return True, status
+        return False, {}
+
+    # ---- Coordinator lifecycle ---------------------------------------------
 
     async def _async_update_data(self) -> dict:
         if not self.client_id:
             await self.async_request_access()
+
         status = await self.async_get_current_status()
-        return {
-            "device": self._device_info,
-            "status": status or {},
-        }
+        volume = await self.async_get_volume() if status else None
+        mute = await self.async_get_mute() if status else None
+
+        if status is None:
+            status = {}
+        if volume is not None:
+            status["VolumeRaw"] = volume
+        if mute is not None:
+            status["MuteRaw"] = int(mute)
+
+        return {"device": self._device_info, "status": status}
 
     async def async_close(self):
         if self._session and not self._session.closed:

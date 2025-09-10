@@ -1,0 +1,3 @@
+debug_status:
+  name: Debug Status
+  description: "Call GetCurrentStatus, GetVolume, GetMute and log the result."
