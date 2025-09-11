@@ -1,3 +1,19 @@
 debug_status:
   name: Debug Status
-  description: "Call GetCurrentStatus, GetVolume, GetMute and log the result."
+  description: >
+    Log raw GetCurrentStatus, GetVolume, and GetMute responses for one or all
+    Loewe TVs. Optionally renew the ClientId first.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Target a specific Loewe TV by config entry_id. If omitted, runs on all.
+      required: false
+      selector:
+        text:
+    force_renew:
+      name: Force Renew ClientId
+      description: Drop current ClientId and request a new one before testing.
+      required: false
+      default: false
+      selector:
+        boolean:

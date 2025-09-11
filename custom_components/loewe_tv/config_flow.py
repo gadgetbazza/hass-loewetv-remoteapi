@@ -47,7 +47,8 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         coordinator = LoeweTVCoordinator(self.hass, host=host, resource_path=resource_path)
 
         try:
-            ok, info = await coordinator.async_test_connection()
+            ok = await coordinator.async_test_connection()
+            info = None
         finally:
             await coordinator.async_close()
 
