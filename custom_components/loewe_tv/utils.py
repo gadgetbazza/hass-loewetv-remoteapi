@@ -60,7 +60,7 @@ def get_device_uuid(iface: str | None = None) -> str:
 
     if not mac:
         _LOGGER.warning("No usable MAC found, falling back to random UUID")
-        return str(uuid.uuid4())
+        return "001122334455"
 
     # Generate a namespace-based UUID so it stays stable across restarts
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, mac))

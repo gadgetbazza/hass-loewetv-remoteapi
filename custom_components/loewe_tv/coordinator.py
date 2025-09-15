@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import xml.etree.ElementTree as ET
+import aiohttp
+
 from datetime import timedelta
 from typing import Optional
-
-import aiohttp
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from .utils import async_get_device_uuid
 
 from .const import (
     DOMAIN,
@@ -77,64 +79,64 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             await self._session.close()
 
     # ---------- Session handling ----------
-    async def _validate_or_repair_session(self) -> bool:
-        """Ensure we have a valid session with the TV, retry RequestAccess if needed."""
+    async def _repair_session(self) -> bool:
+        """(Re)establish a valid session with the TV via RequestAccess."""
         entry = next(
             (e for e in self.hass.config_entries.async_entries(DOMAIN)
              if self.hass.data[DOMAIN].get(e.entry_id) is self),
             None,
         )
-        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else None
+        self.fcid = None
+        self.client_id = None
+        self.device_uuid = "001122334455" #await async_get_device_uuid(hass)
 
-        if self.client_id and self.fcid:
-            _LOGGER.debug(
-                "Session already valid: fcid=%s client_id=%s device_uuid=%s",
-                self.fcid, self.client_id, device_uuid,
-            )
-            return True
+        # Always try a RequestAccess to confirm/refresh session
+        await asyncio.sleep(0.1)
+        result = await self.async_request_access("HomeAssistant")
+        if not result:
+            _LOGGER.error("RequestAccess returned no result")
+            return False
 
-        _LOGGER.warning(
-            "Missing or invalid session (fcid=%s, client_id=%s), attempting RequestAccess",
-            self.fcid, self.client_id,
-        )
-
-        for attempt in range(2):
+        state = result.get("State", "").lower()
+        
+        if state == "pending":
+            _LOGGER.warning("RequestAccess is in progress %s", state)
+            #Make a second pass to confirm it is accepted
+            await asyncio.sleep(0.1)
             result = await self.async_request_access("HomeAssistant")
             if not result:
-                _LOGGER.error("RequestAccess returned no result (attempt %s)", attempt + 1)
-                continue
+                _LOGGER.error("RequestAccess returned no result")
+                return False
+        
+        if state != "accepted":
+            _LOGGER.warning("RequestAccess not accepted yet: %s", state)
+            return False
 
-            state = result.get("State", "").lower()
-            if not result.get("ClientId") or not result.get("fcid"):
-                _LOGGER.warning("RequestAccess missing ClientId/fcid (attempt %s)", attempt + 1)
-                continue
+        # Save new values
+        self.client_id = result.get("ClientId")
+        self.fcid = result.get("fcid")
 
-            if state == "accepted":
-                self.client_id = result["ClientId"]
-                self.fcid = result["fcid"]
+        if not self.client_id or not self.fcid:
+            _LOGGER.error("RequestAccess missing required identifiers")
+            return False
 
-                if entry:
-                    self.hass.config_entries.async_update_entry(
-                        entry,
-                        data={
-                            **entry.data,
-                            CONF_CLIENT_ID: self.client_id,
-                            CONF_FCID: self.fcid,
-                            CONF_DEVICE_UUID: device_uuid,
-                        },
-                    )
+        # Persist back into config entry if we have one
+        if entry:
+            self.hass.config_entries.async_update_entry(
+                entry,
+                data={
+                    **entry.data,
+                    CONF_CLIENT_ID: self.client_id,
+                    CONF_FCID: self.fcid,
+                    CONF_DEVICE_UUID: device_uuid,
+                },
+            )
 
-                _LOGGER.debug(
-                    "Session repaired and persisted: fcid=%s client_id=%s state=%s",
-                    self.fcid, self.client_id, state,
-                )
-                return True
-
-            _LOGGER.warning("RequestAccess state not accepted yet: %s (attempt %s)", state, attempt + 1)
-            await asyncio.sleep(2)
-
-        _LOGGER.error("Failed to obtain valid session after retries")
-        return False
+        _LOGGER.info(
+            "Session repaired: fcid=%s client_id=%s (device_uuid=%s)",
+            self.fcid, self.client_id, self.device_uuid,
+        )
+        return True
 
     # ---------- Pairing ----------
     async def async_request_access(self, device_name: str) -> Optional[dict]:
@@ -147,7 +149,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
              if self.hass.data[DOMAIN].get(e.entry_id) is self),
             None,
         )
-        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else "unknown"
+        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else "001122334455"
 
         envelope = f"""<?xml version="1.0" encoding="utf-8"?>
     <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -394,17 +396,50 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         _LOGGER.warning("SOAP %s failed on %s", action, url)
         return None
 
-    async def _safe_soap_request(self, action: str, inner_xml: str, retry: bool = True) -> str:
-        resp = await self._soap_request(action, inner_xml)
-        if resp:
-            # Treat any valid SOAP envelope as success, even if no tags parsed
-            if f"<{action}Response" in resp:
-                return resp
-        _LOGGER.warning("SOAP %s returned empty/failed, checking session...", action)
-        repaired = await self._validate_or_repair_session()
-        if repaired and retry:
-            _LOGGER.debug("Retrying SOAP %s after session repair", action)
-            return await self._soap_request(action, inner_xml)
-        _LOGGER.error("SOAP %s ultimately failed, no usable response", action)
-        return resp or ""
+    async def _safe_soap_request(
+        self, action: str, inner_xml: str, retry: bool = True
+    ) -> str:
+        """Wrapper around _soap_request that auto-heals the Loewe TV session."""
 
+        # 1. Ensure identifiers exist
+        if not self.client_id or not self.fcid:
+            _LOGGER.debug("Missing fcid/client_id before %s → repairing session", action)
+            repaired = await self._repair_session()
+            if not repaired:
+                _LOGGER.error("Unable to repair session before %s", action)
+                return ""
+
+        # 2. Perform SOAP request
+        resp = await self._soap_request(action, inner_xml)
+
+        if resp:
+            try:
+                root = ET.fromstring(resp)
+
+                # Look for the response element
+                response_el = root.find(f".//{action}Response")
+                if response_el is not None:
+                    # If it has children or text → valid
+                    if list(response_el) or (response_el.text and response_el.text.strip()):
+                        return resp
+                    else:
+                        _LOGGER.debug(
+                            "SOAP response for %s had empty <%sResponse/> → treating as invalid",
+                            action,
+                            action,
+                        )
+            except ET.ParseError:
+                _LOGGER.warning("Failed to parse SOAP response: %s", resp)
+
+        # 3. Empty or invalid response → repair session
+        _LOGGER.debug("Empty/invalid SOAP response for %s, retry=%s", action, retry)
+        if retry:
+            _LOGGER.info("Attempting to repair Loewe TV session after empty response")
+            repaired = await self._repair_session()
+            if repaired:
+                return await self._safe_soap_request(action, inner_xml, retry=False)
+
+        # 4. Still no usable result
+        _LOGGER.error("SOAP %s ultimately failed, no usable response", action)
+        return ""
+        
