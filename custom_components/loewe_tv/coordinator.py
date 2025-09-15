@@ -1,446 +1,410 @@
-"""Coordinator for Loewe TV Remote API integration."""
+"""Coordinator for Loewe TV integration."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
-from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from datetime import timedelta
+from typing import Optional
 
 import aiohttp
-import async_timeout
-import xml.etree.ElementTree as ET
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-    UpdateFailed,
+from .const import (
+    DOMAIN,
+    DEFAULT_RESOURCE_PATH,
+    CONF_CLIENT_ID,
+    CONF_DEVICE_UUID,
+    CONF_FCID,
+    CONF_HOST,
+    SOAP_ENDPOINTS,
 )
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Constants (prefer values from const.py if available)
-# ────────────────────────────────────────────────────────────────────────────────
-try:
-    from .const import (
-        DOMAIN,
-        DEFAULT_SCAN_INTERVAL,
-        MANUFACTURER,
-        MODEL_FALLBACK,
-        SOAP_NS,
-        LTV_NS,
-    )
-except Exception:  # pragma: no cover
-    DOMAIN = "loewe_tv"
-    from datetime import timedelta
-    DEFAULT_SCAN_INTERVAL = timedelta(seconds=10)
-    MANUFACTURER = "Loewe"
-    MODEL_FALLBACK = "TV"
-    SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
-    LTV_NS = "urn:loewe.de:RemoteTV:Tablet"
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _ns(tag: str, ns: str) -> str:
-    return f"{{{ns}}}{tag}"
-
-
-def _xml_escape(text: str) -> str:
-    return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&apos;")
-    )
-
-
-@dataclass(slots=True)
-class DeviceInfoLite:
-    manufacturer: str = MANUFACTURER
-    model: str = MODEL_FALLBACK
-    sw_version: Optional[str] = None
-    name: Optional[str] = None
-    unique_id: Optional[str] = None
-
-
-class LoeweCoordinator(DataUpdateCoordinator[Dict[str, Any]]):
-    """Coordinates all network I/O with the Loewe TV and exposes parsed state."""
+class LoeweTVCoordinator(DataUpdateCoordinator):
+    """Loewe TV data coordinator."""
 
     def __init__(
         self,
-        hass: HomeAssistant,
-        *,
-        # Preferred (new) style:
-        base_url: str | None = None,
-        client_name: str = "HomeAssistant",
-        session: Optional[aiohttp.ClientSession] = None,
-        update_interval=DEFAULT_SCAN_INTERVAL,
-        device_name: Optional[str] = None,
-        unique_id: Optional[str] = None,
-        # Back-compat with older config_flow:
-        host: str | None = None,
-        resource_path: str = "/loewe_tablet_0001",
-        url: str | None = None,
-        port: int | None = None,  # allow explicit port; default 905
-        **_ignored: Any,
+        hass,
+        host: str,
+        resource_path: str = DEFAULT_RESOURCE_PATH,
     ) -> None:
-        """
-        Accept both the new 'base_url' and old ('host', 'resource_path' | 'url') styles.
-        Examples accepted:
-          - base_url="http://192.168.4.121:905/loewe_tablet_0001"
-          - host="192.168.4.121", resource_path="/loewe_tablet_0001" (→ uses port 905)
-          - url="http://192.168.4.121:905/loewe_tablet_0001"
-          - base_url/url supplied as just "192.168.4.121" → normalized to http://IP:905/loewe_tablet_0001
-        """
+        self.hass = hass
+        self.host = host
+        self.resource_path = resource_path
+        self.client_id: Optional[str] = None
+        self.fcid: Optional[str] = None
+        self.device_uuid: Optional[str] = None
+        self._last_raw_response: Optional[str] = None
+        self._session: Optional[aiohttp.ClientSession] = None
 
-        def _ensure_endpoint(ep: str | None) -> str | None:
-            """Normalize any base_url/url to include scheme, port 905, and path."""
-            if not ep:
-                return None
-            ep = ep.strip()
-            if not ep:
-                return None
-            if not (ep.startswith("http://") or ep.startswith("https://")):
-                ep = f"http://{ep}"
-            scheme, rest = ep.split("://", 1)
-            # If no '/' present, add default path (and port if missing)
-            if "/" not in rest:
-                rest = f"{rest}:905/loewe_tablet_0001" if ":" not in rest else f"{rest}/loewe_tablet_0001"
-            host_part, *path_parts = rest.split("/", 1)
-            path = "/" + path_parts[0] if path_parts else "/loewe_tablet_0001"
-            if ":" not in host_part:
-                host_part = f"{host_part}:905"
-            return f"{scheme}://{host_part}{path}"
+        # Restore from config entry if available
+        entry = next(
+            (e for e in self.hass.config_entries.async_entries(DOMAIN)
+             if e.data.get(CONF_HOST) == host),
+            None,
+        )
+        if entry:
+            self.client_id = entry.data.get(CONF_CLIENT_ID, self.client_id)
+            self.fcid = entry.data.get(CONF_FCID, self.fcid)
+            self.device_uuid = entry.data.get(CONF_DEVICE_UUID, self.device_uuid)
 
-        # Normalize endpoint source
-        endpoint = base_url or url
-        if not endpoint and host:
-            host_str = host.strip()
-            if not (host_str.startswith("http://") or host_str.startswith("https://")):
-                host_str = f"http://{host_str}"
-            path = resource_path if resource_path.startswith("/") else f"/{resource_path}"
-            use_port = 905 if port is None else int(port)
-            has_port = ":" in host_str.split("://", 1)[-1]
-            if not has_port:
-                host_str = f"{host_str}:{use_port}"
-            endpoint = f"{host_str.rstrip('/')}{path}"
-        else:
-            endpoint = _ensure_endpoint(endpoint)
-
-        if not endpoint:
-            raise ValueError("LoeweCoordinator requires base_url or host/resource_path/url")
+        _LOGGER.debug(
+            "Coordinator initialized: host=%s resource_path=%s client_id=%s fcid=%s",
+            self.host,
+            self.resource_path,
+            self.client_id,
+            self.fcid,
+        )
 
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN} coordinator",
-            update_interval=update_interval,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=10),
         )
 
-        self.base_url = endpoint.rstrip("/")
-        self.client_name = client_name
-        self._session_external = session is not None
-        self._session: Optional[aiohttp.ClientSession] = session
-        self._fcid = random.randint(1000, 9999)
-        self.client_id: Optional[str] = None
-
-        self._device = DeviceInfoLite(
-            name=device_name or "Loewe TV",
-            unique_id=unique_id,
-        )
-
-        _LOGGER.debug("LoeweCoordinator endpoint set to: %s", self.base_url)
-
-    # ────────────────────────── session lifecycle ──────────────────────────────
     async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
+        if not self._session or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
     async def async_close(self) -> None:
-        """Close our client session if we created it."""
-        if not self._session_external and self._session and not self._session.closed:
+        if self._session and not self._session.closed:
             await self._session.close()
 
-    # ───────────────────────────── SOAP helpers ────────────────────────────────
-    def _next_fcid(self) -> int:
-        self._fcid = (self._fcid + 1) % 100000
-        return self._fcid
+    # ---------- Session handling ----------
+    async def _validate_or_repair_session(self) -> bool:
+        """Ensure we have a valid session with the TV, retry RequestAccess if needed."""
+        entry = next(
+            (e for e in self.hass.config_entries.async_entries(DOMAIN)
+             if self.hass.data[DOMAIN].get(e.entry_id) is self),
+            None,
+        )
+        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else None
 
-    def _envelope(self, inner_xml: str) -> str:
-        return (
-            f'<s:Envelope xmlns:s="{SOAP_NS}">'
-            f"<s:Body>{inner_xml}</s:Body>"
-            f"</s:Envelope>"
+        if self.client_id and self.fcid:
+            _LOGGER.debug(
+                "Session already valid: fcid=%s client_id=%s device_uuid=%s",
+                self.fcid, self.client_id, device_uuid,
+            )
+            return True
+
+        _LOGGER.warning(
+            "Missing or invalid session (fcid=%s, client_id=%s), attempting RequestAccess",
+            self.fcid, self.client_id,
         )
 
-    async def _soap(self, action: str, inner_xml: str, timeout: float = 20.0) -> Optional[str]:
-        """POST a SOAP request. This Loewe firmware prefers a *bare* SOAPAction header."""
-        session = await self._session_get()
-        payload = self._envelope(inner_xml).encode("utf-8")
+        for attempt in range(2):
+            result = await self.async_request_access("HomeAssistant")
+            if not result:
+                _LOGGER.error("RequestAccess returned no result (attempt %s)", attempt + 1)
+                continue
 
-        # IMPORTANT: bare action name, and avoid keep-alive right after access
-        headers = {
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": action,   # bare action name
-            "Connection": "close",  # the TV sometimes drops persistent connections
-        }
+            state = result.get("State", "").lower()
+            if not result.get("ClientId") or not result.get("fcid"):
+                _LOGGER.warning("RequestAccess missing ClientId/fcid (attempt %s)", attempt + 1)
+                continue
 
-        async def _do_post() -> tuple[int, str]:
-            async with async_timeout.timeout(timeout):
-                async with session.post(self.base_url, data=payload, headers=headers) as resp:
-                    text = await resp.text()
-                    return resp.status, text
+            if state == "accepted":
+                self.client_id = result["ClientId"]
+                self.fcid = result["fcid"]
 
-        try:
-            status, text = await _do_post()
-            if status == 200:
-                return text
-            _LOGGER.debug("SOAP non-200 (%s) for %s: %s", status, action, text[:600])
-            return None
-        except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError):
-            _LOGGER.debug("SOAP %s: server disconnected; retrying once...", action)
-            await asyncio.sleep(0.3)
-            try:
-                status, text = await _do_post()
-                if status == 200:
-                    return text
-                _LOGGER.debug("SOAP non-200 (%s) for %s (retry): %s", status, action, text[:600])
-                return None
-            except Exception as err:
-                _LOGGER.debug("SOAP %s retry failed: %s", action, err)
-                return None
-        except asyncio.TimeoutError:
-            _LOGGER.debug("SOAP %s timed out", action)
-            return None
-        except aiohttp.ClientError as err:
-            _LOGGER.debug("SOAP %s client error: %s", action, err)
-            return None
+                if entry:
+                    self.hass.config_entries.async_update_entry(
+                        entry,
+                        data={
+                            **entry.data,
+                            CONF_CLIENT_ID: self.client_id,
+                            CONF_FCID: self.fcid,
+                            CONF_DEVICE_UUID: device_uuid,
+                        },
+                    )
 
-    def _parse_map(self, xml_text: str) -> Dict[str, str]:
-        """Flatten the first level of the SOAP body response into a tag->text map."""
-        out: Dict[str, str] = {}
-        if not xml_text:
-            return out
-        try:
-            root = ET.fromstring(xml_text)
-            body = root.find(_ns("Body", SOAP_NS))
-            if body is None:
-                return out
-            # Flatten first response element
-            for resp in body:
-                for child in resp:
-                    tag = child.tag.split("}")[-1]
-                    out[tag] = (child.text or "").strip()
-        except ET.ParseError as err:
-            _LOGGER.debug("XML parse error: %s", err)
-        return out
+                _LOGGER.debug(
+                    "Session repaired and persisted: fcid=%s client_id=%s state=%s",
+                    self.fcid, self.client_id, state,
+                )
+                return True
 
-    # ───────────────────────────── API methods ────────────────────────────────
-    async def async_request_access(self) -> bool:
-        """Request a ClientId using the full payload this TV expects."""
-        # Drop any stale id before requesting anew
-        self.client_id = None
+            _LOGGER.warning("RequestAccess state not accepted yet: %s (attempt %s)", state, attempt + 1)
+            await asyncio.sleep(2)
 
-        device_type = "Home Assistant"
-        device_name = self._device.name or "Loewe TV"
-        device_uuid = (self._device.unique_id or "ha-" + self.base_url.split("://", 1)[-1]).replace("/", "_")
-        requester = "HA Loewe Integration"
-
-        for attempt in (1, 2, 3):
-            fcid = self._next_fcid()
-            inner = (
-                f'<ltv:RequestAccess xmlns:ltv="{LTV_NS}">'
-                f"<ltv:fcid>{fcid}</ltv:fcid>"
-                f"<ltv:ClientId>?</ltv:ClientId>"
-                f"<ltv:DeviceType>{_xml_escape(device_type)}</ltv:DeviceType>"
-                f"<ltv:DeviceName>{_xml_escape(device_name)}</ltv:DeviceName>"
-                f"<ltv:DeviceUUID>{_xml_escape(device_uuid)}</ltv:DeviceUUID>"
-                f"<ltv:RequesterName>{_xml_escape(requester)}</ltv:RequesterName>"
-                f"</ltv:RequestAccess>"
-            )
-            xml = await self._soap("RequestAccess", inner, timeout=20.0)
-            if xml:
-                parsed = self._parse_map(xml)
-                cid = parsed.get("ClientId")
-                if cid:
-                    self.client_id = cid
-                    _LOGGER.debug("Obtained ClientId: %s", cid)
-                    # Give the TV a beat to settle before the next SOAP call
-                    await asyncio.sleep(0.4)
-                    return True
-            await asyncio.sleep(1.5 * attempt)
-
-        _LOGGER.debug("RequestAccess: all retries failed")
+        _LOGGER.error("Failed to obtain valid session after retries")
         return False
 
-    async def async_get_current_status(self) -> Optional[Dict[str, str]]:
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return None
-        fcid = self._next_fcid()
-        inner = (
-            f'<ltv:GetCurrentStatus xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"</ltv:GetCurrentStatus>"
-        )
-        xml = await self._soap("GetCurrentStatus", inner, timeout=10.0)
-        if xml:
-            return self._parse_map(xml)
+    # ---------- Pairing ----------
+    async def async_request_access(self, device_name: str) -> Optional[dict]:
+        """Perform RequestAccess handshake (assigns fcid + client_id)."""
+        fcid_seed = self.fcid or "1"
+        client_seed = self.client_id or "?"
 
-        # First call right after RequestAccess can race; pause and try once more
-        await asyncio.sleep(0.4)
-        xml = await self._soap("GetCurrentStatus", inner, timeout=10.0)
-        return self._parse_map(xml) if xml else None
+        entry = next(
+            (e for e in self.hass.config_entries.async_entries(DOMAIN)
+             if self.hass.data[DOMAIN].get(e.entry_id) is self),
+            None,
+        )
+        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else "unknown"
+
+        envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+    <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+     xmlns:ltv="urn:loewe.de:RemoteTV:Tablet">
+      <soapenv:Header/>
+      <soapenv:Body>
+        <ltv:RequestAccess>
+            <ltv:fcid>{fcid_seed}</ltv:fcid>
+            <ltv:ClientId>{client_seed}</ltv:ClientId>
+            <ltv:DeviceType>{device_name[:40]}</ltv:DeviceType>
+            <ltv:DeviceName>{device_name[:40]}</ltv:DeviceName>
+            <ltv:DeviceUUID>{device_uuid}</ltv:DeviceUUID>
+            <ltv:RequesterName>Home Assistant Loewe TV Integration</ltv:RequesterName>
+        </ltv:RequestAccess>
+      </soapenv:Body>
+    </soapenv:Envelope>"""
+
+        resp = await self._soap_request("RequestAccess", envelope, raw_envelope=True)
+        if not resp:
+            _LOGGER.debug("RequestAccess: no response")
+            return None
+
+        _LOGGER.debug("Raw RequestAccess response:\n%s", resp)
+        result: dict[str, str] = {}
+
+        if "<fcid>" in resp:
+            self.fcid = result["fcid"] = resp.split("<fcid>")[1].split("</fcid>")[0].strip()
+        if "<ClientId>" in resp:
+            self.client_id = result["ClientId"] = resp.split("<ClientId>")[1].split("</ClientId>")[0].strip()
+        if "<AccessStatus>" in resp:
+            result["State"] = resp.split("<AccessStatus>")[1].split("</AccessStatus>")[0].strip()
+        elif "<State>" in resp:
+            result["State"] = resp.split("<State>")[1].split("</State>")[0].strip()
+
+        _LOGGER.debug("RequestAccess parsed result: %s", result)
+        return result
+
+    # ---------- API helpers ----------
+    def _body_with_ids(self, action: str, ns: str = "ltv", extra_xml: str = "") -> str:
+        """Build a SOAP body element with fcid + client_id and optional extra content."""
+        return (
+            f"<{ns}:{action}>"
+            f"<{ns}:fcid>{{fcid}}</{ns}:fcid>"
+            f"<{ns}:ClientId>{{client_id}}</{ns}:ClientId>"
+            f"{extra_xml}"
+            f"</{ns}:{action}>"
+        )
+
+    # ---------- API methods ----------
+    async def async_get_current_status(self) -> dict[str, str]:
+        resp = await self._safe_soap_request("GetCurrentStatus", self._body_with_ids("GetCurrentStatus"))
+        if not resp:
+            _LOGGER.debug("GetCurrentStatus: no response")
+            return {}
+
+        result: dict[str, str] = {}
+        if "<Power>" in resp:
+            result["power"] = resp.split("<Power>")[1].split("</Power>")[0].strip()
+        if "<HdrPlayerState>" in resp:
+            result["player_state"] = resp.split("<HdrPlayerState>")[1].split("</HdrPlayerState>")[0].strip()
+        elif "<PlayerState>" in resp:
+            result["player_state"] = resp.split("<PlayerState>")[1].split("</PlayerState>")[0].strip()
+        if "<HdrSpeed>" in resp:
+            result["speed"] = resp.split("<HdrSpeed>")[1].split("</HdrSpeed>")[0].strip()
+        elif "<Speed>" in resp:
+            result["speed"] = resp.split("<Speed>")[1].split("</Speed>")[0].strip()
+        if "<SystemLocked>" in resp:
+            result["locked"] = resp.split("<SystemLocked>")[1].split("</SystemLocked>")[0].strip()
+        elif "<LockState>" in resp:
+            result["locked"] = resp.split("<LockState>")[1].split("</LockState>")[0].strip()
+
+        _LOGGER.debug("Parsed GetCurrentStatus: %s", result)
+        return result
 
     async def async_get_volume(self) -> Optional[int]:
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return None
-        fcid = self._next_fcid()
-        inner = (
-            f'<ltv:GetVolume xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"</ltv:GetVolume>"
-        )
-        xml = await self._soap("GetVolume", inner, timeout=10.0)
-        if not xml:
+        resp = await self._safe_soap_request("GetVolume", self._body_with_ids("GetVolume"))
+        if not resp:
+            _LOGGER.debug("GetVolume: no response")
             return None
-        parsed = self._parse_map(xml)  # e.g., {"Value": "180000"} for 18%
-        try:
-            return int(parsed.get("Value", ""))
-        except Exception:
-            return None
-
-    async def async_get_mute(self) -> Optional[bool]:
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return None
-        fcid = self._next_fcid()
-        inner = (
-            f'<ltv:GetMute xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"</ltv:GetMute>"
-        )
-        xml = await self._soap("GetMute", inner, timeout=10.0)
-        if not xml:
-            return None
-        parsed = self._parse_map(xml)
-        val = (parsed.get("Value") or "").strip().lower()
-        if val in ("1", "true", "on"):
-            return True
-        if val in ("0", "false", "off"):
-            return False
+        for tag in ("<Value>", "<CurrentVolume>", "<Volume>"):
+            if tag in resp:
+                try:
+                    volume = int(resp.split(tag)[1].split(tag.replace("<", "</"))[0].strip())
+                    _LOGGER.debug("Parsed GetVolume: %s", volume)
+                    return volume
+                except ValueError:
+                    _LOGGER.warning("GetVolume returned non-integer: %s", resp)
+        _LOGGER.debug("GetVolume: no usable tag found")
         return None
 
-    async def async_set_volume(self, value_0_to_1_000_000: int) -> bool:
-        """Attempt SOAP volume set; returns True/False for success."""
-        value = max(0, min(1_000_000, int(value_0_to_1_000_000)))
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return False
-        fcid = self._next_fcid()
-        inner = (
-            f'<ltv:SetVolume xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"<ltv:Value>{value}</ltv:Value>"
-            f"</ltv:SetVolume>"
-        )
-        xml = await self._soap("SetVolume", inner, timeout=10.0)
-        return xml is not None
+    async def async_get_mute(self) -> Optional[bool]:
+        resp = await self._safe_soap_request("GetMute", self._body_with_ids("GetMute"))
+        if not resp:
+            _LOGGER.debug("GetMute: no response")
+            return None
+
+        for tag in ("<Value>", "<MuteState>", "<Mute>"):
+            if tag in resp:
+                state = resp.split(tag)[1].split(tag.replace("<", "</"))[0].strip().lower()
+
+                if state in ("1", "true", "yes", "on"):
+                    mute = True
+                elif state in ("0", "false", "no", "off"):
+                    mute = False
+                else:
+                    _LOGGER.warning("GetMute returned unrecognized value: %s", state)
+                    return None
+
+                _LOGGER.debug("Parsed GetMute: %s (raw=%s)", mute, state)
+                return mute
+
+        _LOGGER.debug("GetMute: no usable tag found")
+        return None
+
+    async def async_set_volume(self, value: int) -> bool:
+        # Loewe usually expects <Value> not <DesiredVolume>
+        extra = f"<ltv:Value>{value}</ltv:Value>"
+        resp = await self._soap_request("SetVolume", self._body_with_ids("SetVolume", extra_xml=extra))
+        return resp is not None and "<SetVolumeResponse" in resp
 
     async def async_set_mute(self, mute: bool) -> bool:
-        """Set mute state using SOAP (preferred over RC toggle)."""
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return False
-        fcid = self._next_fcid()
-        val = "1" if bool(mute) else "0"
-        inner = (
-            f'<ltv:SetMute xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"<ltv:Value>{val}</ltv:Value>"
-            f"</ltv:SetMute>"
+        # Loewe usually expects <Value>0/1</Value>
+        raw = "1" if mute else "0"
+        extra = f"<ltv:Value>{raw}</ltv:Value>"
+        resp = await self._soap_request("SetMute", self._body_with_ids("SetMute", extra_xml=extra))
+        return resp is not None and "<SetMuteResponse" in resp
+
+    async def async_inject_rc_key(self, value: int) -> bool:
+        extra = (
+            "<ltv:InputEventSequence>"
+            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{value}\" mode=\"press\"/>"
+            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{value}\" mode=\"release\"/>"
+            "</ltv:InputEventSequence>"
         )
-        xml = await self._soap("SetMute", inner, timeout=10.0)
-        return xml is not None
+        return bool(await self._soap_request("InjectRCKey", self._body_with_ids("InjectRCKey", extra_xml=extra)))
 
-    async def async_inject_rc_key(self, keycode: int) -> bool:
-        """Send a remote control key code (fallbacks like mute/volume/power)."""
-        if not self.client_id:
-            ok = await self.async_request_access()
-            if not ok:
-                return False
-        fcid = self._next_fcid()
-        inner = (
-            f'<ltv:InjectRemoteKey xmlns:ltv="{LTV_NS}">'
-            f"<ltv:fcid>{fcid}</ltv:fcid>"
-            f"<ltv:ClientId>{self.client_id}</ltv:ClientId>"
-            f"<ltv:Key>{int(keycode)}</ltv:Key>"
-            f"</ltv:InjectRemoteKey>"
-        )
-        xml = await self._soap("InjectRemoteKey", inner, timeout=10.0)
-        return xml is not None
+    # ---------- Coordinator ----------
+    async def _async_update_data(self) -> dict:
+        status = await self.async_get_current_status()
+        await asyncio.sleep(0.1)
+        volume = await self.async_get_volume()
+        await asyncio.sleep(0.1)
+        mute = await self.async_get_mute()
 
-    async def async_test_connection(self) -> bool:
-        """Lightweight check used by config flow."""
-        st = await self.async_get_current_status()
-        return bool(st)
+        ha_state = None
+        if isinstance(status, dict) and status:
+            power = status.get("power", "").lower()
+            if power in ("tv", "on"):
+                ha_state = "on"
+            elif power in ("standby", "off"):
+                ha_state = "off"
 
-    # ───────────────────────────── polling hook ────────────────────────────────
-    async def _async_update_data(self) -> Dict[str, Any]:
-        """Pull fresh state from TV. Robust to temporary auth/transport errors."""
+        result = {
+            "status": status or {},
+            "device": {"volume": volume, "mute": mute, "ha_state": ha_state},
+        }
+
+        if status or volume is not None or mute is not None:
+            _LOGGER.info(
+                "Successfully connected to Loewe TV at %s (fcid=%s, client_id=%s)",
+                self.host, self.fcid, self.client_id,
+            )
+        else:
+            _LOGGER.warning(
+                "Connected to Loewe TV at %s but no usable data returned (status=%s, volume=%s, mute=%s)",
+                self.host, status, volume, mute,
+            )
+
+        _LOGGER.debug("Update result: %s", result)
+        return result
+
+    # ---------- SOAP core ----------
+    async def _soap_request(
+        self,
+        action: str,
+        inner_xml: str,
+        timeout: float = 8.0,
+        raw_envelope: bool = False,
+    ) -> str | None:
+        cfg = SOAP_ENDPOINTS[action]
+        url = cfg["url"].format(host=self.host)
+        soap_action = cfg["soap_action"]
+        service = cfg["service"]
+        mode = cfg["mode"]
+        prefix = cfg.get("prefix", "ltv")
+
+        headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/soap+xml; charset=utf-8"
+            if mode != "soap_xml_legacy" else "text/xml; charset=utf-8",
+            "SOAPAction": soap_action,
+        }
+
+        if raw_envelope:
+            envelope = inner_xml
+        elif mode == "soap_xml_legacy":
+            envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+    <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"
+     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+     SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+      <SOAP-ENV:Header/>
+      <SOAP-ENV:Body>
+        {inner_xml}
+      </SOAP-ENV:Body>
+    </SOAP-ENV:Envelope>"""
+        else:
+            if not self.fcid or not self.client_id:
+                _LOGGER.error("SOAP %s aborted: missing fcid or client_id", action)
+                return None
+            inner_with_ids = (
+                inner_xml.replace("{{fcid}}", str(self.fcid)).replace("{fcid}", str(self.fcid))
+                         .replace("{{client_id}}", self.client_id).replace("{client_id}", self.client_id)
+            )
+            _LOGGER.debug("Resolved %s body:\n%s", action, inner_with_ids)
+            envelope = f"""<?xml version="1.0" encoding="utf-8"?>
+    <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+     xmlns:{prefix}="{service}">
+      <soapenv:Header/>
+      <soapenv:Body>
+        {inner_with_ids}
+      </soapenv:Body>
+    </soapenv:Envelope>"""
+
+        session = await self._session_get()
         try:
-            if not self.client_id:
-                # Give the TV a moment if it’s just powered up
-                await asyncio.sleep(0.5)
+            _LOGGER.debug("SOAP action=%s url=%s", action, url)
+            _LOGGER.debug("SOAP request body:\n%s", envelope)
+            async with session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
+                text = await resp.text()
+                self._last_raw_response = text
+                if resp.status == 200:
+                    normalized = (
+                        text.replace("<m:", "<").replace("</m:", "</")
+                            .replace("<ltv:", "<").replace("</ltv:", "</")
+                    )
+                    _LOGGER.debug("Raw %s response:\n%s", action, text)
+                    _LOGGER.debug("Normalized %s response:\n%s", action, normalized)
+                    return normalized
+                _LOGGER.error("SOAP %s failed (%s):\n%s", action, resp.status, text)
+        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+            _LOGGER.debug("SOAP %s network error: %s", action, err)
 
-            status = await self.async_get_current_status()
+        _LOGGER.warning("SOAP %s failed on %s", action, url)
+        return None
 
-            # Retry once if status failed (often due to expired ClientId)
-            if status is None:
-                await self.async_request_access()
-                status = await self.async_get_current_status()
-
-            vol = await self.async_get_volume() if status is not None else None
-            mute = await self.async_get_mute() if status is not None else None
-
-            # Normalize container
-            if status is None:
-                status = {}
-
-            if vol is not None:
-                status["VolumeRaw"] = int(vol)  # 0..1_000_000
-            if mute is not None:
-                status["MuteRaw"] = 1 if mute else 0
-
-            payload: Dict[str, Any] = {
-                "device": {
-                    "manufacturer": self._device.manufacturer,
-                    "model": self._device.model,
-                    "sw_version": self._device.sw_version,
-                    "name": self._device.name,
-                    "unique_id": self._device.unique_id,
-                },
-                "status": status,
-            }
-            return payload
-        except Exception as err:
-            raise UpdateFailed(str(err)) from err
-
-
-# Back-compat for existing config_flow import
-LoeweTVCoordinator = LoeweCoordinator
+    async def _safe_soap_request(self, action: str, inner_xml: str, retry: bool = True) -> str:
+        resp = await self._soap_request(action, inner_xml)
+        if resp:
+            # Treat any valid SOAP envelope as success, even if no tags parsed
+            if f"<{action}Response" in resp:
+                return resp
+        _LOGGER.warning("SOAP %s returned empty/failed, checking session...", action)
+        repaired = await self._validate_or_repair_session()
+        if repaired and retry:
+            _LOGGER.debug("Retrying SOAP %s after session repair", action)
+            return await self._soap_request(action, inner_xml)
+        _LOGGER.error("SOAP %s ultimately failed, no usable response", action)
+        return resp or ""
 

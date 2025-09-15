@@ -6,12 +6,16 @@
         "description": "Enter TV IP and resource path",
         "data": {
           "host": "TV IP address",
-          "resource_path": "Resource path (usually /loewe_tablet_0001)"
+          "resource_path": "Resource path (e.g. /RemoteTV/RemoteTV or /loewe_tablet_0001)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Cannot connect to TV"
+      "cannot_connect": "Cannot connect to TV",
+      "pairing_not_accepted": "TV did not accept the pairing request. Please try again."
+    },
+    "abort": {
+      "already_configured": "This TV is already configured"
     }
   }
 }

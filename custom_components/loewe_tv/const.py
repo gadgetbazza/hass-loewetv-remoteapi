@@ -1,57 +1,81 @@
-"""Constants for the Loewe TV Remote API integration."""
+"""Constants for Loewe TV integration."""
 
-from __future__ import annotations
-from datetime import timedelta
+from homeassistant.const import Platform
 
-# ── Domain / names
 DOMAIN = "loewe_tv"
-INTEGRATION_NAME = "Loewe TV"
-MANUFACTURER = "Loewe"
-MODEL_FALLBACK = "TV"
 
-# ── Config entry keys used across the integration
-CONF_BASE_URL = "base_url"
 CONF_HOST = "host"
-CONF_URL = "url"
-CONF_CLIENT_NAME = "client_name"
-
-# Keys required by config_flow.py (must exist to import)
 CONF_RESOURCE_PATH = "resource_path"
 CONF_CLIENT_ID = "client_id"
 CONF_DEVICE_UUID = "device_uuid"
-CONF_CONTROL_TRANSPORT = "control_transport"
+CONF_FCID = "fcid"
 
-# ── Defaults
-DEFAULT_CLIENT_NAME = "HomeAssistant"
-# Our coordinator uses a timedelta; 10s is a good default for polling
-DEFAULT_SCAN_INTERVAL = timedelta(seconds=10)
-# The config_flow expects this exact string default (from your original code)
 DEFAULT_RESOURCE_PATH = "/loewe_tablet_0001"
 
-# Optional scan interval option key (kept for compatibility)
-OPT_SCAN_INTERVAL = "scan_interval"
+# Remote control key codes (partial set)
+RC_KEY_POWER_OFF = 25
 
-# Transport options (kept for compatibility with existing flows/options)
-TRANSPORT_AUTO = "auto"
-TRANSPORT_SOAP = "soap_only"
-TRANSPORT_UPNP = "upnp_only"
+# Platforms supported by this integration
+PLATFORMS: list[Platform] = [Platform.MEDIA_PLAYER]
 
-# ── Namespaces
-SOAP_NS = "http://schemas.xmlsoap.org/soap/envelope/"
-LTV_NS = "urn:loewe.de:RemoteTV:Tablet"
+# ---------- SOAP endpoint definitions ----------
+SOAP_ENDPOINTS = {
+    # Pairing
+    "RequestAccess": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "RequestAccess",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
 
-# ── Remote key codes shared by platforms
-RC_KEY_POWER = 12
-RC_KEY_MUTE_TOGGLE = 13
-RC_KEY_VOL_DOWN = 20
-RC_KEY_VOL_UP = 21
+    # Status
+    "GetCurrentStatus": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetCurrentStatus",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
 
-# ── Coordinator payload keys
-ATTR_DEVICE = "device"
-ATTR_STATUS = "status"
-ATTR_POWER = "Power"
-ATTR_VOLUME_RAW = "VolumeRaw"  # 0..1_000_000
-ATTR_MUTE_RAW = "MuteRaw"      # 0/1
+    # Volume
+    "GetVolume": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetVolume",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    "SetVolume": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "SetVolume",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
 
-# ── Services
-SERVICE_DEBUG_STATUS = "debug_status"
+    # Mute
+    "GetMute": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetMute",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    "SetMute": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "SetMute",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+
+    # Remote keys
+    "InjectRCKey": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "InjectRCKey",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",  # can adjust later if we discover u:/m:
+    },
+}

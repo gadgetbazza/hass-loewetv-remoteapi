@@ -29,6 +29,13 @@ logger:
     custom_components.loewe_tv: debug
 ```
 
+## About Me & This Integration
+This is my first attempt at building a Home Assistant device integration.  Despite being in the software industry for some 30+ years, I have no python skills but do understand the general principles of code and hopefully I've used that to good effect here.  The Loewe TV is super picky about it's Soap API constructs, computers are typically fickle about case and construct, but the Loewe is not consistent across it's methods making it somewhat challenging and requiring a lot of packet traces on the network to get this to where it is now.  I will admit to using ChatGPT to help with the python syntax and HA device integration constructs, so here's hoping that this will all work for anyone else wanting to use this.  If you have any issues or feedback, please feel free to create a ticket and I will assist when I can.
+
+Cheers, Barry
+
+<a href="https://www.buymeacoffee.com/gadgetbazza" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
 ## Notes
 - The TV may require `RequestAccess` after power cycles. The integration retries in the background.
 - Resource path defaults to `/loewe_tablet_0001`.
