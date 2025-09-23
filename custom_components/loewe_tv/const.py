@@ -38,6 +38,37 @@ SOAP_ENDPOINTS = {
         "prefix": "ltv",
     },
 
+    # Playback
+    "GetCurrentPlayback": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetCurrentPlayback",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    
+    # Sources/Channels
+    "GetListOfChannelLists": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetListOfChannelLists",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    "GetChannelList": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetChannelList",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    "ZapToMedia": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "ZapToMedia",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
     # Volume
     "GetVolume": {
         "url": "http://{host}:905/loewe_tablet_0001",

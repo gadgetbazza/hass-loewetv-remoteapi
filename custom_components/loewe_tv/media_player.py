@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 import logging
-from typing import Any
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
 )
-from homeassistant.components.media_player.const import MediaPlayerState
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.const import STATE_UNKNOWN
@@ -36,6 +34,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         MediaPlayerEntityFeature.VOLUME_SET
         | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.TURN_OFF
+        | MediaPlayerEntityFeature.SELECT_SOURCE
     )
 
     def __init__(self, coordinator: LoeweTVCoordinator, entry: ConfigEntry) -> None:
@@ -43,7 +42,8 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         self.coordinator = coordinator
         self._entry = entry
         self._attr_name = entry.title or "Loewe TV"
-        self._attr_unique_id = entry.entry_id
+        # use device_uuid for stable unique_id
+        self._attr_unique_id = coordinator.device_uuid or entry.entry_id
         self._attr_device_info = {
             "identifiers": {(DOMAIN, self._attr_unique_id)},
             "manufacturer": "Loewe",
@@ -55,10 +55,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     @property
     def state(self) -> str | None:
         device = (self.coordinator.data or {}).get("device", {})
-        ha_state = device.get("ha_state")
-        if ha_state:
-            return ha_state
-        return STATE_UNKNOWN
+        return device.get("ha_state", STATE_UNKNOWN)
 
     @property
     def volume_level(self) -> float | None:
@@ -70,9 +67,40 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         return None
 
     @property
+    def volume_step(self) -> float:
+        """Override HA default step (0.1 → too big) to 0.01 (1%)."""
+        return 0.01
+
+    @property
     def is_volume_muted(self) -> bool | None:
         device = (self.coordinator.data or {}).get("device", {})
         return device.get("mute")
+
+    @property
+    def source_list(self) -> list[str] | None:
+        """Return the list of available inputs (plus TV tuner)."""
+        sources = [src["name"] for src in self.coordinator.available_sources]
+        if "TV" not in sources:
+            sources.insert(0, "TV")
+        return sources
+
+    @property
+    def source(self) -> str | None:
+        """Return the currently active input."""
+        loc = self.coordinator.current_locator
+        if not loc:
+            return None
+
+        # First check AV sources
+        for src in self.coordinator.available_sources:
+            if src["locator"] == loc:
+                return src["name"]
+
+        # If not found but matches last known TV tuner locator → treat as "TV"
+        if loc == getattr(self.coordinator, "_last_tv_locator", None):
+            return "TV"
+
+        return None
 
     # ---------- Commands ----------
     async def async_turn_off(self) -> None:
@@ -99,4 +127,51 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
             device["mute"] = mute
             self.async_write_ha_state()
 
+    async def async_select_source(self, source: str) -> None:
+        """Switch TV input or AV source."""
+        if source == "TV":
+            locator = getattr(self.coordinator, "_last_tv_locator", None)
+
+            if not locator:
+                # Fall back to first channel from Freeview (or favlist)
+                locator = await self.coordinator.async_get_first_tv_channel()
+                if locator:
+                    _LOGGER.debug("LoeweTV: Using fallback first TV channel %s", locator)
+                else:
+                    _LOGGER.warning("LoeweTV: No TV channels available to zap to")
+                    return
+
+            _LOGGER.debug("LoeweTV: Switching to TV channel %s", locator)
+            if await self.coordinator.async_set_channel(locator):
+                self.async_write_ha_state()
+            else:
+                _LOGGER.warning("LoeweTV: Zap to TV channel %s failed", locator)
+                # Revert state back to previous source
+                self.async_write_ha_state()
+            return
+
+        # Otherwise, look through AV sources
+        for src in self.coordinator.available_sources:
+            if src["name"] == source:
+                locator = src["locator"]
+                _LOGGER.debug("LoeweTV: Switching source to %s (%s)", source, locator)
+                if await self.coordinator.async_set_channel(locator):
+                    self.async_write_ha_state()
+                else:
+                    _LOGGER.warning("LoeweTV: Zap to %s (%s) failed", source, locator)
+                    # Revert state back
+                    self.async_write_ha_state()
+                return
+
+        _LOGGER.warning("LoeweTV: Requested source %s not found", source)
+
+    async def async_channel_up(self) -> None:
+        """Send channel up command."""
+        _LOGGER.debug("LoeweTV: Channel Up pressed")
+        await self.coordinator.async_channel_up()
+
+    async def async_channel_down(self) -> None:
+        """Send channel down command."""
+        _LOGGER.debug("LoeweTV: Channel Down pressed")
+        await self.coordinator.async_channel_down()
 

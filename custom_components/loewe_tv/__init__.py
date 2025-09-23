@@ -5,6 +5,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers import service
 
 from .const import (
     DOMAIN,
@@ -47,6 +48,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         host=entry.data[CONF_HOST],
         resource_path=entry.data.get(CONF_RESOURCE_PATH, DEFAULT_RESOURCE_PATH),
     )
+    
     _LOGGER.debug(
         "async_setup_entry: host=%s resource_path=%s client_id=%s",
         host,
@@ -59,6 +61,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # --- Register services ---
+    async def handle_channel_up(call):
+        await coordinator.async_channel_up()
+
+    async def handle_channel_down(call):
+        await coordinator.async_channel_down()
+
+    async def handle_refresh_sources(call):
+        """Handle manual refresh of AV and channel sources."""
+        target_entity_ids = call.data.get("entity_id")
+
+        # Run only for this coordinator if no entity_id filter given,
+        # or if the entity_id matches this config entry
+        if not target_entity_ids or any(
+            eid.endswith(entry.entry_id) for eid in target_entity_ids
+        ):
+            await coordinator.async_refresh_sources()
+            await coordinator.async_request_refresh()
+
+    hass.services.async_register(
+        DOMAIN,
+        "refresh_sources",
+        handle_refresh_sources,
+    )
+
+    hass.services.async_register(DOMAIN, "channel_up", handle_channel_up)
+    hass.services.async_register(DOMAIN, "channel_down", handle_channel_down)
+    hass.services.async_register(DOMAIN, "refresh_sources", handle_refresh_sources)
+
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -68,3 +100,4 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: LoeweTVCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_close()
     return unload_ok
+

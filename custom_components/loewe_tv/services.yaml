@@ -17,3 +17,25 @@ debug_status:
       default: false
       selector:
         boolean:
+
+refresh_sources:
+  name: Refresh Sources
+  description: Re-fetch the list of available AV inputs and TV channels from the Loewe TV.
+  target:
+    entity:
+      domain: media_player
+
+channel_up:
+  name: Channel Up
+  description: Step up to the next available TV channel.
+  target:
+    entity:
+      domain: media_player
+
+channel_down:
+  name: Channel Down
+  description: Step down to the previous available TV channel.
+  target:
+    entity:
+      domain: media_player
+

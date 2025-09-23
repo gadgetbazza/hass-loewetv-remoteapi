@@ -5,6 +5,7 @@ import os
 import socket
 import uuid
 import logging
+import re
 from typing import Optional
 
 from homeassistant.core import HomeAssistant
@@ -69,4 +70,3 @@ def get_device_uuid(iface: str | None = None) -> str:
 async def async_get_device_uuid(hass: HomeAssistant, iface: str | None = None) -> str:
     """Async wrapper for get_device_uuid (offloads blocking I/O)."""
     return await hass.async_add_executor_job(get_device_uuid, iface)
-

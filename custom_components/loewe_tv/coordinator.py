@@ -10,7 +10,9 @@ import aiohttp
 from datetime import timedelta
 from typing import Optional
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from .utils import async_get_device_uuid
+from .utils import get_device_uuid
+
+from homeassistant.components.media_player.const import MediaPlayerState
 
 from .const import (
     DOMAIN,
@@ -24,10 +26,26 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
 class LoeweTVCoordinator(DataUpdateCoordinator):
     """Loewe TV data coordinator."""
 
+    # --- properties to expose values to entities ---
+
+    @property
+    def current_mode(self) -> str | None:
+        """Current playback mode (tv, radio, drplus, etc.)."""
+        return getattr(self, "_current_mode", None)
+        
+    @property
+    def available_sources(self) -> list[dict[str, str]]:
+        """Return the list of available sources (friendly name + locator)."""
+        return getattr(self, "_available_sources", [])
+
+    @property
+    def current_locator(self) -> str | None:
+        return getattr(self, "_current_locator", None)
+
+        
     def __init__(
         self,
         hass,
@@ -39,9 +57,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         self.resource_path = resource_path
         self.client_id: Optional[str] = None
         self.fcid: Optional[str] = None
-        self.device_uuid: Optional[str] = None
+        self.device_uuid = get_device_uuid()
         self._last_raw_response: Optional[str] = None
         self._session: Optional[aiohttp.ClientSession] = None
+        self._available_sources: list[dict[str, str]] = []
+        self._last_tv_locator: str | None = None
+
 
         # Restore from config entry if available
         entry = next(
@@ -88,10 +109,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         )
         self.fcid = None
         self.client_id = None
-        self.device_uuid = "001122334455" #await async_get_device_uuid(hass)
 
         # Always try a RequestAccess to confirm/refresh session
-        await asyncio.sleep(0.1)
         result = await self.async_request_access("HomeAssistant")
         if not result:
             _LOGGER.error("RequestAccess returned no result")
@@ -102,7 +121,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         if state == "pending":
             _LOGGER.warning("RequestAccess is in progress %s", state)
             #Make a second pass to confirm it is accepted
-            await asyncio.sleep(0.1)
             result = await self.async_request_access("HomeAssistant")
             if not result:
                 _LOGGER.error("RequestAccess returned no result")
@@ -128,7 +146,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                     **entry.data,
                     CONF_CLIENT_ID: self.client_id,
                     CONF_FCID: self.fcid,
-                    CONF_DEVICE_UUID: device_uuid,
+                    CONF_DEVICE_UUID: self.device_uuid,
                 },
             )
 
@@ -224,6 +242,99 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Parsed GetCurrentStatus: %s", result)
         return result
 
+    async def async_get_channel_lists(self) -> list[dict[str, str]]:
+        """Retrieve the available channel/input lists from the TV."""
+        body = self._body_with_ids(
+            "GetListOfChannelLists",
+            extra_xml="""
+                <ltv:QueryParameters>
+                    <ltv:Range startIndex="0" maxItems="20"/>
+                </ltv:QueryParameters>
+            """,
+        )
+
+        resp = await self._safe_soap_request("GetListOfChannelLists", body)
+        if not resp:
+            _LOGGER.debug("GetListOfChannelLists: no response")
+            return []
+
+        sources: list[dict[str, str]] = []
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp)
+            response_el = root.find(".//GetListOfChannelListsResponse")
+            if response_el is not None:
+                for clist in response_el.findall(".//ResultItemChannelList"):
+                    name_el = clist.find("Name")
+                    view_el = clist.find("View")
+                    if name_el is not None and view_el is not None:
+                        sources.append({
+                            "name": name_el.text or "Unknown",
+                            "view": view_el.text or "",
+                        })
+        except Exception as e:
+            _LOGGER.warning("Failed to parse GetListOfChannelLists response: %s", e)
+
+        return sources
+
+    async def async_get_channel_list(self, view_id: str) -> list[dict[str, str]]:
+        """Retrieve the items of a channel list (e.g. AV list for HDMI inputs)."""
+        body = self._body_with_ids(
+            "GetChannelList",
+            extra_xml=f"""
+                <ltv:ChannelListView>{view_id}</ltv:ChannelListView>
+                <ltv:QueryParameters>
+                    <ltv:Range startIndex="0" maxItems="20" />
+                    <ltv:MediaItemInformation>true</ltv:MediaItemInformation>
+                    <ltv:MediaItemClass></ltv:MediaItemClass>
+                </ltv:QueryParameters>
+            """,
+        )
+
+        resp = await self._safe_soap_request("GetChannelList", body)
+        if not resp:
+            _LOGGER.debug("GetChannelList: no response for %s", view_id)
+            return []
+
+        items: list[dict[str, str]] = []
+        try:
+            root = ET.fromstring(resp)
+            response_el = root.find(".//GetChannelListResponse")
+            if response_el is not None:
+                for ref in response_el.findall(".//ResultItemReference"):
+
+                    locator = ref.attrib.get("locator")
+                    short_info = ref.attrib.get("shortInfo")
+                    caption = ref.attrib.get("caption")
+                    if locator:
+                        items.append({
+                            "name": short_info or caption or locator,
+                            "locator": locator,
+                        })
+
+                _LOGGER.debug(
+                    "Parsed %d sources from %s: %s",
+                    len(items), view_id, items
+                )
+
+        except Exception as e:
+            _LOGGER.warning("Failed to parse GetChannelList response: %s", e)
+
+        return items
+
+    async def async_set_channel(self, locator: str) -> bool:
+        """Switch TV to a given locator using ZapToMedia."""
+        body = f"""
+            <ltv:ZapToMedia>
+                <ltv:fcid>{self.fcid}</ltv:fcid>
+                <ltv:ClientId>{self.client_id}</ltv:ClientId>
+                <ltv:Player>0</ltv:Player>
+                <ltv:Locator>{locator}</ltv:Locator>
+            </ltv:ZapToMedia>
+        """
+        resp = await self._safe_soap_request("ZapToMedia", body)
+        return self._parse_zap_result(resp, locator, "ZapToMedia")
+
     async def async_get_volume(self) -> Optional[int]:
         resp = await self._safe_soap_request("GetVolume", self._body_with_ids("GetVolume"))
         if not resp:
@@ -286,40 +397,199 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         )
         return bool(await self._soap_request("InjectRCKey", self._body_with_ids("InjectRCKey", extra_xml=extra)))
 
-    # ---------- Coordinator ----------
-    async def _async_update_data(self) -> dict:
-        status = await self.async_get_current_status()
-        await asyncio.sleep(0.1)
-        volume = await self.async_get_volume()
-        await asyncio.sleep(0.1)
-        mute = await self.async_get_mute()
+    async def async_get_current_playback(self) -> dict[str, str]:
+        """Poll the TV for current playback mode and source info."""
+        body = self._body_with_ids(
+            "GetCurrentPlayback",
+            extra_xml="<ltv:Player>0</ltv:Player>",
+        )
+        resp = await self._safe_soap_request("GetCurrentPlayback", body)
+        if not resp:
+            _LOGGER.debug("GetCurrentPlayback: no response")
+            return {}
 
-        ha_state = None
+        result: dict[str, str] = {}
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(resp)
+
+            # Look for the response element
+            response_el = root.find(".//GetCurrentPlaybackResponse")
+            if response_el is not None:
+                for child in response_el:
+                    # Store each field in dict (Mode, Locator, MediaItemUuid, etc.)
+                    tag = child.tag.split("}")[-1]  # strip namespace if present
+                    result[tag] = child.text or ""
+        except Exception as e:
+            _LOGGER.warning("Failed to parse GetCurrentPlayback response: %s", e)
+
+        return result
+    
+    async def async_channel_up(self) -> bool:
+        return await self.async_inject_rc_key(24)  # CH+ keycode
+
+    async def async_channel_down(self) -> bool:
+        return await self.async_inject_rc_key(23)  # CH- keycode
+
+    async def async_refresh_sources(self) -> None:
+        """Force refresh of available sources (AV + tuner)."""
+        try:
+            avlist_view = await self.async_get_avlist_view()
+            if avlist_view:
+                avlistitems = await self.async_get_channel_list(avlist_view)
+                self.available_sources = avlistitems or []
+                _LOGGER.info("Manually refreshed sources, found %d items", len(self.available_sources))
+            else:
+                _LOGGER.warning("No AV list found during manual refresh")
+        except Exception as e:
+            _LOGGER.error("Error refreshing sources: %s", e)
+
+    async def async_get_first_tv_channel(self) -> str | None:
+        """Return the locator of the first TV channel (favlist > fastscan)."""
+        channel_lists = await self.async_get_channel_lists()
+        if not channel_lists:
+            _LOGGER.warning("No channel lists found when searching for TV channel")
+            return None
+
+        # Prefer favourites
+        favlist = next((c for c in channel_lists if "favlist" in c["view"]), None)
+        if favlist:
+            items = await self.async_get_channel_list(favlist["view"])
+            if items:
+                locator = items[0]["locator"]
+                _LOGGER.debug("Using first favourite channel: %s", locator)
+                return locator
+
+        # Fallback to fastscan (full DVB channel list)
+        fastscan = next((c for c in channel_lists if "fastscan" in c["view"]), None)
+        if fastscan:
+            items = await self.async_get_channel_list(fastscan["view"])
+            if items:
+                locator = items[0]["locator"]
+                _LOGGER.debug("Using first fastscan channel: %s", locator)
+                return locator
+
+        _LOGGER.warning("No TV channels available to zap to")
+        return None
+
+
+    # ---------- Coordinator ----------
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch latest data from the Loewe TV."""
+
+        status = {}
+        playback = {}
+        volume = None
+        mute = None
+        channel_lists = []
+        avlistitems = []
+
+        # ---------- Step 1: get current tv status ----------
+        try:
+            status = await self.async_get_current_status()
+        except Exception as e:
+            _LOGGER.debug("GetCurrentStatus request failed: %s", e)
+
+        ha_state = MediaPlayerState.OFF  # default if no response
         if isinstance(status, dict) and status:
             power = status.get("power", "").lower()
             if power in ("tv", "on"):
-                ha_state = "on"
+                ha_state = MediaPlayerState.ON
             elif power in ("standby", "off"):
-                ha_state = "off"
+                ha_state = MediaPlayerState.OFF
+        else:
+            _LOGGER.debug(
+                "No valid status response from Loewe TV at %s, assuming OFF", self.host
+            )
 
+        # ---------- Bail out early if TV is off ----------
+        if ha_state == MediaPlayerState.OFF:
+            return {
+                "status": status,
+                "device": {"volume": None, "mute": None, "ha_state": ha_state},
+                "playback": {},
+                "channel_lists": [],
+                "available_sources": getattr(self, "_available_sources", []),
+            }
+
+        # ---------- Step 2: refresh sources if empty ----------
+        if not self._available_sources:
+            channel_lists = await self.async_get_channel_lists()
+            avlist = next((c for c in channel_lists if c.get("name") == "#3051"), None)
+            avlistitems = None
+            if avlist:
+                avlistitems = await self.async_get_channel_list(avlist["view"])
+                self._available_sources = avlistitems
+                _LOGGER.info("Found %d available sources on AV list", len(avlistitems))
+            else:
+                self._available_sources = []
+                _LOGGER.debug("No AV list (#3051) found in channel_lists")
+
+        # ---------- Step 3: get tv playback info ----------
+        playback = await self.async_get_current_playback()
+        if playback:
+            self._current_mode = playback.get("Mode")
+            self._current_locator = playback.get("Locator")
+
+            if self._current_locator:
+                if not self._available_sources:
+                    _LOGGER.warning(
+                        "Available sources unexpectedly empty while processing playback locator"
+                    )
+                known_locators = {src["locator"] for src in self._available_sources}
+                if (
+                    self._current_locator not in known_locators
+                    and self._current_locator != getattr(self, "_last_tv_locator", None)
+                ):
+                    self._last_tv_locator = self._current_locator
+                    _LOGGER.debug("Storing new TV tuner locator: %s", self._last_tv_locator)
+
+        # ---------- Step 4: get volume ----------
+        volume = await self.async_get_volume()
+
+        # ---------- Step 5: get mute status ----------
+        mute = await self.async_get_mute()
+
+        # ---------- Sanity logging ----------
+        if (
+            not status
+            or not playback
+            or volume is None
+            or mute is None
+            or channel_lists is None
+            or avlistitems is None
+        ):
+            _LOGGER.debug(
+                "Connected to Loewe TV at %s but one or more returned status was invalid ...",
+                self.host,
+            )
+            if not status:
+                _LOGGER.debug("GetCurrentStatus=%s", status)
+            if not playback:
+                _LOGGER.debug("GetCurrentPlayback=%s", playback)
+            if volume is None:
+                _LOGGER.debug("GetVolume=%s", volume)
+            if mute is None:
+                _LOGGER.debug("GetMute=%s", mute)
+            if channel_lists is None:
+                _LOGGER.debug("GetListOfChannelLists=%s", channel_lists)
+            if avlistitems is None:
+                _LOGGER.debug("GetChannelList=%s", avlistitems)
+        else:
+            _LOGGER.info("Successfully updated data from Loewe TV at %s", self.host)
+
+        # ---------- Build result ----------
         result = {
-            "status": status or {},
+            "status": status,
             "device": {"volume": volume, "mute": mute, "ha_state": ha_state},
+            "playback": playback,
+            "channel_lists": channel_lists,
+            "available_sources": getattr(self, "_available_sources", []),
         }
 
-        if status or volume is not None or mute is not None:
-            _LOGGER.info(
-                "Successfully connected to Loewe TV at %s (fcid=%s, client_id=%s)",
-                self.host, self.fcid, self.client_id,
-            )
-        else:
-            _LOGGER.warning(
-                "Connected to Loewe TV at %s but no usable data returned (status=%s, volume=%s, mute=%s)",
-                self.host, status, volume, mute,
-            )
-
-        _LOGGER.debug("Update result: %s", result)
+        _LOGGER.debug("Update Data result: %s", result)
         return result
+
 
     # ---------- SOAP core ----------
     async def _soap_request(
@@ -381,6 +651,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             async with session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
                 text = await resp.text()
                 self._last_raw_response = text
+                await asyncio.sleep(0.1) #TV doesn't like rapid fire requests, so adding in a delay here on all requests.
                 if resp.status == 200:
                     normalized = (
                         text.replace("<m:", "<").replace("</m:", "</")
@@ -443,3 +714,27 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         _LOGGER.error("SOAP %s ultimately failed, no usable response", action)
         return ""
         
+    def _parse_zap_result(self, resp: str | None, target: str | int, action: str) -> bool:
+        """Check SOAP zap result: success if <Result>0</Result>."""
+        if not resp:
+            _LOGGER.warning("%s failed: no response for %s", action, target)
+            return False
+
+        try:
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(resp)
+            result_elem = root.find(".//Result")
+            if result_elem is not None and result_elem.text.strip() == "0":
+                _LOGGER.debug("%s succeeded for %s", action, target)
+                return True
+            else:
+                _LOGGER.warning(
+                    "%s did not indicate success for %s (Result=%s)",
+                    action,
+                    target,
+                    result_elem.text if result_elem is not None else "MISSING",
+                )
+        except Exception as e:
+            _LOGGER.error("Error parsing %s response for %s: %s", action, target, e)
+
+        return False
