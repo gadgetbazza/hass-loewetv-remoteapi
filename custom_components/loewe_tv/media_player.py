@@ -12,11 +12,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import STATE_UNKNOWN
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, RC_KEY_POWER_OFF
+from .const import DOMAIN, RC_KEY_POWER_OFF, RC_KEY_POWER_ON
 from .coordinator import LoeweTVCoordinator
+from .utils import async_send_wol
 
 _LOGGER = logging.getLogger(__name__)
-
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities
@@ -31,9 +31,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
 
     _attr_should_poll = False
     _attr_supported_features = (
-        MediaPlayerEntityFeature.VOLUME_SET
-        | MediaPlayerEntityFeature.VOLUME_MUTE
+        MediaPlayerEntityFeature.TURN_ON
         | MediaPlayerEntityFeature.TURN_OFF
+        | MediaPlayerEntityFeature.VOLUME_SET
+        | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.SELECT_SOURCE
     )
 
@@ -109,8 +110,19 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         await self.coordinator.async_inject_rc_key(RC_KEY_POWER_OFF)
 
     async def async_turn_on(self) -> None:
-        """Turn on the TV (not yet implemented)."""
-        _LOGGER.warning("LoeweTV: Turn on not implemented yet")
+        """Wake TV via WOL, then send RC TV_ON (22) to leave network standby."""
+        mac = self.coordinator.tv_mac
+        if mac:
+            _LOGGER.debug("LoeweTV: Sending WOL to %s", mac)
+            try:
+                await async_send_wol(self.hass, mac)
+            except Exception as e:
+                _LOGGER.warning("LoeweTV: Failed to send WOL to %s: %s", mac, e)
+        else:
+            _LOGGER.warning("LoeweTV: No TV MAC available for WOL")
+
+        _LOGGER.debug("LoeweTV: Sending RC TV_ON")
+        await self.coordinator.async_inject_rc_key(RC_KEY_POWER_ON)
 
     async def async_set_volume_level(self, volume: float) -> None:
         raw_value = int(volume * 1_000_000)

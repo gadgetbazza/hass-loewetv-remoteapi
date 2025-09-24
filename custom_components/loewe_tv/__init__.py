@@ -14,6 +14,7 @@ from .const import (
     CONF_CLIENT_ID,
     CONF_DEVICE_UUID,
     CONF_FCID,
+    CONF_TV_MAC,
     PLATFORMS,
     DEFAULT_RESOURCE_PATH,
 )
@@ -48,6 +49,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         host=entry.data[CONF_HOST],
         resource_path=entry.data.get(CONF_RESOURCE_PATH, DEFAULT_RESOURCE_PATH),
     )
+    
+    # Load the persisted TV MAC captured during the config flow
+    coordinator.tv_mac = entry.data.get(CONF_TV_MAC)
     
     _LOGGER.debug(
         "async_setup_entry: host=%s resource_path=%s client_id=%s",

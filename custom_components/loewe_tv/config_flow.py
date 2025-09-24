@@ -5,6 +5,7 @@ from typing import Any
 import voluptuous as vol
 import logging
 import asyncio
+import xml.etree.ElementTree as ET
 
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
@@ -15,7 +16,8 @@ from .const import (
     CONF_RESOURCE_PATH,
     CONF_CLIENT_ID,
     CONF_DEVICE_UUID,
-    CONF_FCID,   # <-- add this
+    CONF_FCID,
+    CONF_TV_MAC,
     DEFAULT_RESOURCE_PATH,
 )
 
@@ -65,26 +67,26 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if result:
                     _LOGGER.debug("RequestAccess attempt %s parsed result: %s", attempt, result)
-                    if result.get("ClientId") and result.get("fcid"):
-                        return self.async_create_entry(
-                            title=f"Loewe TV ({host})",
-                            data={
-                                "host": host,
-                                "resource_path": resource_path,
-                                "client_id": result["ClientId"],
-                                "device_uuid": coordinator.device_uuid,
-                                "fcid": result["fcid"],
-                            },
-                        )
-                else:
-                    # Log the raw text that came back, if any
-                    if coordinator._last_raw_response:
-                        _LOGGER.debug("RequestAccess attempt %s raw response:\n%s",
-                                      attempt, coordinator._last_raw_response)
-                    else:
-                        _LOGGER.debug("RequestAccess attempt %s returned no response", attempt)
 
-                await asyncio.sleep(2)
+                    # Only break when the TV has actually accepted the pairing
+                    if (
+                        result.get("State") == "accepted"
+                        and result.get("ClientId")
+                        and result.get("fcid")
+                    ):
+                        break
+                else:
+                    if coordinator._last_raw_response:
+                        _LOGGER.debug(
+                            "RequestAccess attempt %s raw response:\n%s",
+                            attempt, coordinator._last_raw_response
+                        )
+                    else:
+                        _LOGGER.debug(
+                            "RequestAccess attempt %s returned no response", attempt
+                        )
+
+                await asyncio.sleep(1)
 
         except Exception as err:
             _LOGGER.error("RequestAccess failed: %s", err, exc_info=True)
@@ -146,6 +148,24 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_DEVICE_UUID: device_uuid,
             CONF_FCID: fcid,
         }
+
+        # Fetch and persist the TV's MAC so WOL works even if HA restarts while TV is off
+        resp = await coordinator._safe_soap_request(
+            "GetDeviceData", coordinator._body_with_ids("GetDeviceData")
+        )
+        if resp:
+            try:
+                ns = {"ltv": "urn:loewe.de:RemoteTV:Tablet"}
+                root = ET.fromstring(resp)
+                mac_elem = (
+                    root.find(".//ltv:MAC-Address-LAN", ns)
+                    or root.find(".//ltv:MAC-Address", ns)
+                )
+                if mac_elem is not None and mac_elem.text:
+                    data[CONF_TV_MAC] = mac_elem.text.strip()
+                    _LOGGER.debug("LoeweTV: Captured TV MAC during config flow: %s", data[CONF_TV_MAC])
+            except Exception as e:
+                _LOGGER.warning("LoeweTV: Could not parse MAC from GetDeviceData: %s", e)
 
         _LOGGER.debug(
             "Pairing success: ClientId=%s DeviceUUID=%s State=%s",

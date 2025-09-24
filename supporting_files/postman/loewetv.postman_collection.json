@@ -1,0 +1,165 @@
+{
+  "info": {
+    "_postman_id": "12345678-abcd-4321-efgh-9876543210ff",
+    "name": "Loewe TV Remote API",
+    "description": "SOAP API requests for Loewe TV (Remote API)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "RequestAccess",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#RequestAccess" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:RequestAccess>\n      <m:ClientId>LRemoteClient-0-123456789</m:ClientId>\n      <m:FriendlyName>PostmanTest</m:FriendlyName>\n      <m:ClientType>tablet</m:ClientType>\n    </m:RequestAccess>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "GetVolume",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#GetVolume" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:GetVolume>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:Device>0</m:Device>\n    </m:GetVolume>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "SetVolume",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#SetVolume" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:SetVolume>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:Device>0</m:Device>\n      <m:Volume>{{VOLUME}}</m:Volume>\n      <m:Mute>false</m:Mute>\n    </m:SetVolume>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "GetListOfChannelLists",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#GetListOfChannelLists" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:GetListOfChannelLists>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:QueryParameters>\n        <m:Range startIndex=\"0\" maxItems=\"20\"/>\n      </m:QueryParameters>\n    </m:GetListOfChannelLists>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "GetChannelList (AV list example)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#GetChannelList" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:GetChannelList>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:ViewName>{{VIEW_NAME}}</m:ViewName>\n      <m:QueryParameters>\n        <m:Range startIndex=\"0\" maxItems=\"20\"/>\n      </m:QueryParameters>\n    </m:GetChannelList>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "GetCurrentPlayback",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#GetCurrentPlayback" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:GetCurrentPlayback>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:Player>0</m:Player>\n    </m:GetCurrentPlayback>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    },
+    {
+      "name": "SetCurrentPlayback (switch input)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "text/xml; charset=utf-8" },
+          { "key": "SOAPAction", "value": "urn:loewe.de:RemoteTV:Tablet#SetCurrentPlayback" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<soapenv:Envelope xmlns:soapenv=\"http://schemas.xmlsoap.org/soap/envelope/\"\n xmlns:m=\"urn:loewe.de:RemoteTV:Tablet\">\n  <soapenv:Header/>\n  <soapenv:Body>\n    <m:SetCurrentPlayback>\n      <m:fcid>{{FCID}}</m:fcid>\n      <m:ClientId>{{CLIENT_ID}}</m:ClientId>\n      <m:Player>0</m:Player>\n      <m:Mode>tv</m:Mode>\n      <m:Locator>{{LOCATOR}}</m:Locator>\n    </m:SetCurrentPlayback>\n  </soapenv:Body>\n</soapenv:Envelope>"
+        },
+        "url": {
+          "raw": "http://{{TV_HOST}}:905/loewe_tablet_0001",
+          "protocol": "http",
+          "host": ["{{TV_HOST}}"],
+          "port": "905",
+          "path": ["loewe_tablet_0001"]
+        }
+      }
+    }
+  ],
+  "variable": [
+    { "key": "TV_HOST", "value": "192.168.4.121" },
+    { "key": "FCID", "value": "1" },
+    { "key": "CLIENT_ID", "value": "LRemoteClient-0-123456789" },
+    { "key": "VIEW_NAME", "value": "avlistslca4c30f2-a905-4f17-b56b-f4466ebe9e09" },
+    { "key": "VOLUME", "value": "20" },
+    { "key": "LOCATOR", "value": "channel://4:hdmi1:slca4c30f2-a905-4f17-b56b-f4466ebe9e09" }
+  ]
+}

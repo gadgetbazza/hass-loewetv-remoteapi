@@ -21,6 +21,7 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_FCID,
     CONF_HOST,
+    CONF_TV_MAC,
     SOAP_ENDPOINTS,
 )
 
@@ -62,7 +63,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         self._session: Optional[aiohttp.ClientSession] = None
         self._available_sources: list[dict[str, str]] = []
         self._last_tv_locator: str | None = None
-
+        self.tv_mac: str | None = None
 
         # Restore from config entry if available
         entry = next(
@@ -217,6 +218,27 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         )
 
     # ---------- API methods ----------
+    async def async_get_device_data(self) -> None:
+        """Fetch TV device data (MAC, etc.) and store it."""
+        resp = await self._soap_request("GetDeviceData", self._body_with_ids("GetDeviceData"))
+        if not resp:
+            _LOGGER.warning("LoeweTV: GetDeviceData failed")
+            return
+
+        try:
+            root = ET.fromstring(resp)
+            ns = {"ltv": "urn:loewe.de:RemoteTV:Tablet"}
+            mac_elem = (
+                root.find(".//ltv:MAC-Address-LAN", ns)
+                or root.find(".//ltv:MAC-Address", ns)
+            )
+            if mac_elem is not None and mac_elem.text:
+                self.tv_mac = mac_elem.text.strip()
+                _LOGGER.debug("LoeweTV: Retrieved TV MAC %s", self.tv_mac)
+        except Exception as e:
+            _LOGGER.error("LoeweTV: Error parsing GetDeviceData response: %s", e)
+
+   
     async def async_get_current_status(self) -> dict[str, str]:
         resp = await self._safe_soap_request("GetCurrentStatus", self._body_with_ids("GetCurrentStatus"))
         if not resp:

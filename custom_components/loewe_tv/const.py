@@ -9,11 +9,13 @@ CONF_RESOURCE_PATH = "resource_path"
 CONF_CLIENT_ID = "client_id"
 CONF_DEVICE_UUID = "device_uuid"
 CONF_FCID = "fcid"
+CONF_TV_MAC = "tv_mac"
 
 DEFAULT_RESOURCE_PATH = "/loewe_tablet_0001"
 
 # Remote control key codes (partial set)
 RC_KEY_POWER_OFF = 25
+RC_KEY_POWER_ON = 22
 
 # Platforms supported by this integration
 PLATFORMS: list[Platform] = [Platform.MEDIA_PLAYER]
@@ -29,6 +31,15 @@ SOAP_ENDPOINTS = {
         "prefix": "ltv",
     },
 
+    # Device
+    "GetDeviceData": {
+        "url": "http://{host}:905/loewe_tablet_0001",
+        "soap_action": "GetDeviceData",
+        "service": "urn:loewe.de:RemoteTV:Tablet",
+        "mode": "soap_xml_new",
+        "prefix": "ltv",
+    },
+    
     # Status
     "GetCurrentStatus": {
         "url": "http://{host}:905/loewe_tablet_0001",

@@ -7,6 +7,7 @@ import uuid
 import logging
 import re
 from typing import Optional
+from typing import Tuple
 
 from homeassistant.core import HomeAssistant
 
@@ -70,3 +71,26 @@ def get_device_uuid(iface: str | None = None) -> str:
 async def async_get_device_uuid(hass: HomeAssistant, iface: str | None = None) -> str:
     """Async wrapper for get_device_uuid (offloads blocking I/O)."""
     return await hass.async_add_executor_job(get_device_uuid, iface)
+
+
+# --- WOL helpers ------------------------------------------------------------
+def _normalize_mac(mac: str) -> bytes:
+    cleaned = re.sub(r"[^0-9A-Fa-f]", "", mac)
+    if len(cleaned) != 12:
+        raise ValueError(f"Invalid MAC: {mac}")
+    return bytes.fromhex(cleaned)
+
+def send_wol(mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> None:
+    """Send a Wake-on-LAN magic packet to the given MAC."""
+    mac_bytes = _normalize_mac(mac)
+    packet = b"\xff" * 6 + mac_bytes * 16
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(packet, (broadcast, port))
+    finally:
+        sock.close()
+
+async def async_send_wol(hass: HomeAssistant, mac: str, broadcast: str = "255.255.255.255", port: int = 9) -> None:
+    """Async wrapper for send_wol."""
+    await hass.async_add_executor_job(send_wol, mac, broadcast, port)
