@@ -8,9 +8,9 @@ import xml.etree.ElementTree as ET
 import aiohttp
 
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Optional
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from .utils import get_device_uuid
+from .utils import async_get_device_uuid
 
 from homeassistant.components.media_player.const import MediaPlayerState
 
@@ -21,7 +21,6 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_FCID,
     CONF_HOST,
-    CONF_TV_MAC,
     SOAP_ENDPOINTS,
 )
 
@@ -58,12 +57,14 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         self.resource_path = resource_path
         self.client_id: Optional[str] = None
         self.fcid: Optional[str] = None
-        self.device_uuid = get_device_uuid()
+        self.device_uuid: str | None = None
         self._last_raw_response: Optional[str] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._available_sources: list[dict[str, str]] = []
         self._last_tv_locator: str | None = None
         self.tv_mac: str | None = None
+        self._sources_lock = asyncio.Lock()
+        self._avlist_view: str | None = None
 
         # Restore from config entry if available
         entry = next(
@@ -103,6 +104,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     # ---------- Session handling ----------
     async def _repair_session(self) -> bool:
         """(Re)establish a valid session with the TV via RequestAccess."""
+        _LOGGER.info("API connection may have been lost, attempting to repair session")
+        
         entry = next(
             (e for e in self.hass.config_entries.async_entries(DOMAIN)
              if self.hass.data[DOMAIN].get(e.entry_id) is self),
@@ -120,15 +123,18 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         state = result.get("State", "").lower()
         
         if state == "pending":
-            _LOGGER.warning("RequestAccess is in progress %s", state)
+            _LOGGER.debug("RequestAccess returned pending state, making a second pass")
             #Make a second pass to confirm it is accepted
+            
             result = await self.async_request_access("HomeAssistant")
             if not result:
                 _LOGGER.error("RequestAccess returned no result")
                 return False
+            
+            state = result.get("State", "").lower()
         
         if state != "accepted":
-            _LOGGER.warning("RequestAccess not accepted yet: %s", state)
+            _LOGGER.warning("RequestAccess state is not yet accepted: %s", state)
             return False
 
         # Save new values
@@ -136,7 +142,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         self.fcid = result.get("fcid")
 
         if not self.client_id or not self.fcid:
-            _LOGGER.error("RequestAccess missing required identifiers")
+            _LOGGER.error("RequestAccess missing required client_id and fcid identifiers")
             return False
 
         # Persist back into config entry if we have one
@@ -151,7 +157,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 },
             )
 
-        _LOGGER.info(
+        _LOGGER.debug(
             "Session repaired: fcid=%s client_id=%s (device_uuid=%s)",
             self.fcid, self.client_id, self.device_uuid,
         )
@@ -160,15 +166,34 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     # ---------- Pairing ----------
     async def async_request_access(self, device_name: str) -> Optional[dict]:
         """Perform RequestAccess handshake (assigns fcid + client_id)."""
+        _LOGGER.debug("Executing async_request_access")
+        
         fcid_seed = self.fcid or "1"
         client_seed = self.client_id or "?"
 
-        entry = next(
-            (e for e in self.hass.config_entries.async_entries(DOMAIN)
-             if self.hass.data[DOMAIN].get(e.entry_id) is self),
-            None,
-        )
-        device_uuid = entry.data.get(CONF_DEVICE_UUID) if entry else "001122334455"
+        # Ensure we have a device_uuid, with your preferred precedence:
+        # 1) in-memory (self.device_uuid)
+        # 2) stored in HA entry
+        # 3) compute via async helper (then persist + cache)
+        if not self.device_uuid:
+            entry = next(
+                (e for e in self.hass.config_entries.async_entries(DOMAIN)
+                 if self.hass.data[DOMAIN].get(e.entry_id) is self),
+                None,
+            )
+            stored = entry.data.get(CONF_DEVICE_UUID) if entry else None
+            if stored:
+                self.device_uuid = stored
+            else:
+                self.device_uuid = await async_get_device_uuid(self.hass)
+                if entry:
+                    self.hass.config_entries.async_update_entry(
+                        entry,
+                        data={**entry.data, CONF_DEVICE_UUID: self.device_uuid},
+                    )
+
+        device_uuid = self.device_uuid  # use this in your RequestAccess envelope
+
 
         envelope = f"""<?xml version="1.0" encoding="utf-8"?>
     <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
@@ -188,10 +213,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
 
         resp = await self._soap_request("RequestAccess", envelope, raw_envelope=True)
         if not resp:
-            _LOGGER.debug("RequestAccess: no response")
+            #_LOGGER.debug("RequestAccess: no response")
             return None
 
-        _LOGGER.debug("Raw RequestAccess response:\n%s", resp)
+        #_LOGGER.debug("Raw RequestAccess response:\n%s", resp)
         result: dict[str, str] = {}
 
         if "<fcid>" in resp:
@@ -220,9 +245,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     # ---------- API methods ----------
     async def async_get_device_data(self) -> None:
         """Fetch TV device data (MAC, etc.) and store it."""
-        resp = await self._soap_request("GetDeviceData", self._body_with_ids("GetDeviceData"))
+        resp = await self._safe_soap_request("GetDeviceData", self._body_with_ids("GetDeviceData"))
         if not resp:
-            _LOGGER.warning("LoeweTV: GetDeviceData failed")
+            #_LOGGER.warning("LoeweTV: GetDeviceData failed")
             return
 
         try:
@@ -242,7 +267,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     async def async_get_current_status(self) -> dict[str, str]:
         resp = await self._safe_soap_request("GetCurrentStatus", self._body_with_ids("GetCurrentStatus"))
         if not resp:
-            _LOGGER.debug("GetCurrentStatus: no response")
+            #_LOGGER.debug("GetCurrentStatus: no response")
             return {}
 
         result: dict[str, str] = {}
@@ -277,7 +302,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
 
         resp = await self._safe_soap_request("GetListOfChannelLists", body)
         if not resp:
-            _LOGGER.debug("GetListOfChannelLists: no response")
+            #_LOGGER.debug("GetListOfChannelLists: no response")
             return []
 
         sources: list[dict[str, str]] = []
@@ -315,7 +340,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
 
         resp = await self._safe_soap_request("GetChannelList", body)
         if not resp:
-            _LOGGER.debug("GetChannelList: no response for %s", view_id)
+            #_LOGGER.debug("GetChannelList: no response for %s", view_id)
             return []
 
         items: list[dict[str, str]] = []
@@ -354,13 +379,29 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 <ltv:Locator>{locator}</ltv:Locator>
             </ltv:ZapToMedia>
         """
+
         resp = await self._safe_soap_request("ZapToMedia", body)
-        return self._parse_zap_result(resp, locator, "ZapToMedia")
+        ok = self._parse_zap_result(resp, locator, "ZapToMedia")
+        if ok:
+            # ---- Optimistic update ----
+            self._current_locator = locator
+            # Heuristic: set mode so HA UI stays stable until next poll
+            #lower = locator.lower()
+            #if lower.startswith(("dvb://", "tv://")):
+            #    self._current_mode = "tv"
+            #elif lower.startswith(("av://", "hdmi://", "scart://")):
+            #    self._current_mode = "av"
+            # Notify entities right away to avoid source flicker
+            self.async_update_listeners()
+            # Then reconcile with real state after a short delay
+            #self.hass.loop.create_task(self._delayed_refresh_after_zap())
+        return ok
+
 
     async def async_get_volume(self) -> Optional[int]:
         resp = await self._safe_soap_request("GetVolume", self._body_with_ids("GetVolume"))
         if not resp:
-            _LOGGER.debug("GetVolume: no response")
+            #_LOGGER.debug("GetVolume: no response")
             return None
         for tag in ("<Value>", "<CurrentVolume>", "<Volume>"):
             if tag in resp:
@@ -376,7 +417,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     async def async_get_mute(self) -> Optional[bool]:
         resp = await self._safe_soap_request("GetMute", self._body_with_ids("GetMute"))
         if not resp:
-            _LOGGER.debug("GetMute: no response")
+            #_LOGGER.debug("GetMute: no response")
             return None
 
         for tag in ("<Value>", "<MuteState>", "<Mute>"):
@@ -400,15 +441,16 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     async def async_set_volume(self, value: int) -> bool:
         # Loewe usually expects <Value> not <DesiredVolume>
         extra = f"<ltv:Value>{value}</ltv:Value>"
-        resp = await self._soap_request("SetVolume", self._body_with_ids("SetVolume", extra_xml=extra))
+        resp = await self._safe_soap_request("SetVolume", self._body_with_ids("SetVolume", extra_xml=extra))
         return resp is not None and "<SetVolumeResponse" in resp
 
     async def async_set_mute(self, mute: bool) -> bool:
         # Loewe usually expects <Value>0/1</Value>
         raw = "1" if mute else "0"
         extra = f"<ltv:Value>{raw}</ltv:Value>"
-        resp = await self._soap_request("SetMute", self._body_with_ids("SetMute", extra_xml=extra))
+        resp = await self._safe_soap_request("SetMute", self._body_with_ids("SetMute", extra_xml=extra))
         return resp is not None and "<SetMuteResponse" in resp
+        
 
     async def async_inject_rc_key(self, value: int) -> bool:
         extra = (
@@ -417,7 +459,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{value}\" mode=\"release\"/>"
             "</ltv:InputEventSequence>"
         )
-        return bool(await self._soap_request("InjectRCKey", self._body_with_ids("InjectRCKey", extra_xml=extra)))
+        resp = await self._safe_soap_request("InjectRCKey", self._body_with_ids("InjectRCKey", extra_xml=extra))
+        return bool(resp)
 
     async def async_get_current_playback(self) -> dict[str, str]:
         """Poll the TV for current playback mode and source info."""
@@ -427,7 +470,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         )
         resp = await self._safe_soap_request("GetCurrentPlayback", body)
         if not resp:
-            _LOGGER.debug("GetCurrentPlayback: no response")
+            #_LOGGER.debug("GetCurrentPlayback: no response")
             return {}
 
         result: dict[str, str] = {}
@@ -456,13 +499,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
     async def async_refresh_sources(self) -> None:
         """Force refresh of available sources (AV + tuner)."""
         try:
-            avlist_view = await self.async_get_avlist_view()
-            if avlist_view:
-                avlistitems = await self.async_get_channel_list(avlist_view)
-                self.available_sources = avlistitems or []
-                _LOGGER.info("Manually refreshed sources, found %d items", len(self.available_sources))
-            else:
-                _LOGGER.warning("No AV list found during manual refresh")
+            await self.async_ensure_available_sources(force=True)
         except Exception as e:
             _LOGGER.error("Error refreshing sources: %s", e)
 
@@ -503,8 +540,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         playback = {}
         volume = None
         mute = None
-        channel_lists = []
-        avlistitems = []
 
         # ---------- Step 1: get current tv status ----------
         try:
@@ -530,22 +565,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 "status": status,
                 "device": {"volume": None, "mute": None, "ha_state": ha_state},
                 "playback": {},
-                "channel_lists": [],
                 "available_sources": getattr(self, "_available_sources", []),
             }
 
-        # ---------- Step 2: refresh sources if empty ----------
-        if not self._available_sources:
-            channel_lists = await self.async_get_channel_lists()
-            avlist = next((c for c in channel_lists if c.get("name") == "#3051"), None)
-            avlistitems = None
-            if avlist:
-                avlistitems = await self.async_get_channel_list(avlist["view"])
-                self._available_sources = avlistitems
-                _LOGGER.info("Found %d available sources on AV list", len(avlistitems))
-            else:
-                self._available_sources = []
-                _LOGGER.debug("No AV list (#3051) found in channel_lists")
+        # ---------- Step 2: ensure sources ----------
+        await self.async_ensure_available_sources(force=False)
 
         # ---------- Step 3: get tv playback info ----------
         playback = await self.async_get_current_playback()
@@ -578,8 +602,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             or not playback
             or volume is None
             or mute is None
-            or channel_lists is None
-            or avlistitems is None
         ):
             _LOGGER.debug(
                 "Connected to Loewe TV at %s but one or more returned status was invalid ...",
@@ -593,10 +615,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 _LOGGER.debug("GetVolume=%s", volume)
             if mute is None:
                 _LOGGER.debug("GetMute=%s", mute)
-            if channel_lists is None:
-                _LOGGER.debug("GetListOfChannelLists=%s", channel_lists)
-            if avlistitems is None:
-                _LOGGER.debug("GetChannelList=%s", avlistitems)
         else:
             _LOGGER.info("Successfully updated data from Loewe TV at %s", self.host)
 
@@ -605,8 +623,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             "status": status,
             "device": {"volume": volume, "mute": mute, "ha_state": ha_state},
             "playback": playback,
-            "channel_lists": channel_lists,
-            "available_sources": getattr(self, "_available_sources", []),
         }
 
         _LOGGER.debug("Update Data result: %s", result)
@@ -656,7 +672,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 inner_xml.replace("{{fcid}}", str(self.fcid)).replace("{fcid}", str(self.fcid))
                          .replace("{{client_id}}", self.client_id).replace("{client_id}", self.client_id)
             )
-            _LOGGER.debug("Resolved %s body:\n%s", action, inner_with_ids)
+            #_LOGGER.debug("Resolved %s body:\n%s", action, inner_with_ids)
             envelope = f"""<?xml version="1.0" encoding="utf-8"?>
     <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
      xmlns:{prefix}="{service}">
@@ -669,6 +685,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         session = await self._session_get()
         try:
             _LOGGER.debug("SOAP action=%s url=%s", action, url)
+            _LOGGER.debug("SOAP headers:\n%s", headers)
             _LOGGER.debug("SOAP request body:\n%s", envelope)
             async with session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
                 text = await resp.text()
@@ -679,12 +696,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                         text.replace("<m:", "<").replace("</m:", "</")
                             .replace("<ltv:", "<").replace("</ltv:", "</")
                     )
-                    _LOGGER.debug("Raw %s response:\n%s", action, text)
-                    _LOGGER.debug("Normalized %s response:\n%s", action, normalized)
+                    _LOGGER.debug("SOAP %s response:\n%s", action, text)
+                    #_LOGGER.debug("Normalized %s response:\n%s", action, normalized)
                     return normalized
                 _LOGGER.error("SOAP %s failed (%s):\n%s", action, resp.status, text)
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            _LOGGER.debug("SOAP %s network error: %s", action, err)
+            _LOGGER.warning("SOAP %s network error: %s", action, err)
 
         _LOGGER.warning("SOAP %s failed on %s", action, url)
         return None
@@ -696,7 +713,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
 
         # 1. Ensure identifiers exist
         if not self.client_id or not self.fcid:
-            _LOGGER.debug("Missing fcid/client_id before %s → repairing session", action)
+            #_LOGGER.debug("Missing fcid/client_id before %s → repairing session", action)
             repaired = await self._repair_session()
             if not repaired:
                 _LOGGER.error("Unable to repair session before %s", action)
@@ -727,7 +744,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         # 3. Empty or invalid response → repair session
         _LOGGER.debug("Empty/invalid SOAP response for %s, retry=%s", action, retry)
         if retry:
-            _LOGGER.info("Attempting to repair Loewe TV session after empty response")
+            #_LOGGER.info("Attempting to repair Loewe TV session after empty response")
             repaired = await self._repair_session()
             if repaired:
                 return await self._safe_soap_request(action, inner_xml, retry=False)
@@ -760,3 +777,44 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Error parsing %s response for %s: %s", action, target, e)
 
         return False
+
+    async def _find_avlist_view(self) -> str | None:
+        """Locate the AV list view id (e.g. '#3051') and cache it."""
+        channel_lists = await self.async_get_channel_lists()
+        if not channel_lists:
+            self._avlist_view = None
+            _LOGGER.debug("No channel lists available while searching for AV list")
+            return None
+
+        # Your existing heuristic: match name '#3051'
+        avlist = next((c for c in channel_lists if c.get("name") == "#3051"), None)
+        self._avlist_view = avlist.get("view") if avlist else None
+
+        if self._avlist_view:
+            _LOGGER.debug("Cached AV list view id: %s", self._avlist_view)
+        else:
+            _LOGGER.debug("AV list '#3051' not found in channel lists")
+
+        return self._avlist_view
+
+
+    async def async_ensure_available_sources(self, force: bool = False) -> list[dict[str, str]]:
+        """
+        Ensure _available_sources is populated.
+        - If force is False and we already have sources, do nothing.
+        - Otherwise (or if empty), (re)fetch and cache them.
+        """
+        async with self._sources_lock:
+            if not force and self._available_sources:
+                return self._available_sources
+
+            view = self._avlist_view or await self._find_avlist_view()
+            if not view:
+                self._available_sources = []
+                _LOGGER.debug("No AV list view available; sources cleared")
+                return self._available_sources
+
+            items = await self.async_get_channel_list(view)
+            self._available_sources = items or []
+            _LOGGER.info("Loaded %d available sources from AV list", len(self._available_sources))
+            return self._available_sources

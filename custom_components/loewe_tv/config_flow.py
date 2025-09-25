@@ -70,7 +70,7 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                     # Only break when the TV has actually accepted the pairing
                     if (
-                        result.get("State") == "accepted"
+                        result.get("State").lower() == "accepted"
                         and result.get("ClientId")
                         and result.get("fcid")
                     ):
@@ -118,7 +118,7 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors=errors,
             )
 
-        if result.get("State") != "accepted":
+        if result.get("State").lower() != "accepted":
             _LOGGER.error("RequestAccess never reached accepted state: %s", result)
             errors["base"] = "pairing_not_accepted"
             return self.async_show_form(

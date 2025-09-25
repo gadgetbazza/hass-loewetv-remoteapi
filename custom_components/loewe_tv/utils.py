@@ -56,16 +56,16 @@ def _read_iface_mac(iface: str) -> Optional[str]:
 
 
 def get_device_uuid(iface: str | None = None) -> str:
-    """Blocking helper: derive a stable UUID based on MAC address."""
+    """Blocking helper: return the actual MAC address of a network interface."""
     iface = iface or _get_default_route_iface()
     mac = _read_iface_mac(iface) if iface else None
 
     if not mac:
-        _LOGGER.warning("No usable MAC found, falling back to random UUID")
-        return "001122334455"
+        _LOGGER.warning("No usable MAC found, falling back to fake MAC 00:11:22:33:44:55")
+        return "00:11:22:33:44:55"
 
-    # Generate a namespace-based UUID so it stays stable across restarts
-    return str(uuid.uuid5(uuid.NAMESPACE_DNS, mac))
+    # Return the raw MAC address string
+    return mac
 
 
 async def async_get_device_uuid(hass: HomeAssistant, iface: str | None = None) -> str:
