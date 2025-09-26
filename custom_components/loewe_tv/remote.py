@@ -8,7 +8,7 @@ from homeassistant.components.remote import RemoteEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN
+from .const import DOMAIN, LOEWE_RC_CODES
 from .coordinator import LoeweTVCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,25 +39,38 @@ class LoeweTVRemote(RemoteEntity):
         super().__init__()
         self.coordinator = coordinator
         self._entry = entry
-        device = (coordinator.data or {}).get("device", {})
-        self._attr_name = (device.get("name") or entry.title or "Loewe TV") + " Remote"
-        self._attr_unique_id = (device.get("unique_id") or entry.entry_id) + "_remote"
+        self._attr_unique_id = f"{entry.entry_id}_remote"
+
+        device_info = coordinator._device_info or {}
+
+        # Prefer NetworkHostName, fallback to entry title or default
+        base_name = (
+            device_info.get("NetworkHostName")
+            or entry.title
+            or "Loewe TV"
+        )
+        self._attr_name = base_name + " Remote"
+
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._attr_unique_id)},
-            "manufacturer": device.get("manufacturer") or "Loewe",
-            "model": device.get("model") or "TV",
-            "sw_version": device.get("sw_version"),
-            "name": self._attr_name,
+            "identifiers": {(DOMAIN, entry.entry_id)},   # unify here
+            "manufacturer": "Loewe",
+            "model": device_info.get("Chassis", "TV"),
+            "sw_version": device_info.get("SW-Version", ""),
+            "name": base_name,   # Device name (without " Remote")
         }
 
     async def async_send_command(self, command: List[str], **kwargs: Any) -> None:
         """Send one or more RC key codes."""
         for cmd in command:
-            try:
-                key = int(cmd)
-            except ValueError:
-                _LOGGER.warning("Invalid RC key: %s", cmd)
-                continue
-            _LOGGER.warning("LoeweTV: Sending RC key %s", key)
-            await self.coordinator.async_inject_rc_key(key)
+            # Look up symbolic key if needed
+            if cmd.lower() in LOEWE_RC_CODES:
+                key = LOEWE_RC_CODES[cmd.lower()]
+            else:
+                try:
+                    key = int(cmd)
+                except ValueError:
+                    _LOGGER.warning("Invalid RC key: %s", cmd)
+                    continue
 
+            _LOGGER.debug("LoeweTV: Sending RC key %s (%s)", key, cmd)
+            await self.coordinator.async_inject_rc_key(key)

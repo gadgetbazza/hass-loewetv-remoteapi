@@ -46,21 +46,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator = LoeweTVCoordinator(
         hass,
-        host=entry.data[CONF_HOST],
-        resource_path=entry.data.get(CONF_RESOURCE_PATH, DEFAULT_RESOURCE_PATH),
+        host=host,
+        resource_path=resource_path,
     )
-    
+
     # Load the persisted TV MAC captured during the config flow
     coordinator.tv_mac = entry.data.get(CONF_TV_MAC)
-    
-    _LOGGER.debug(
-        "async_setup_entry: host=%s resource_path=%s client_id=%s",
-        host,
-        resource_path,
-        entry.data.get(CONF_CLIENT_ID),
-    )
-    
-    # Make sure session is valid before we start updates
+
+    # 🔹 Fetch static device info early
+    await coordinator.async_get_device_data()
+
+    # 🔹 Make sure session is valid before we start updates
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -77,19 +73,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Handle manual refresh of AV and channel sources."""
         target_entity_ids = call.data.get("entity_id")
 
-        # Run only for this coordinator if no entity_id filter given,
-        # or if the entity_id matches this config entry
         if not target_entity_ids or any(
             eid.endswith(entry.entry_id) for eid in target_entity_ids
         ):
             await coordinator.async_refresh_sources()
             await coordinator.async_request_refresh()
-
-    hass.services.async_register(
-        DOMAIN,
-        "refresh_sources",
-        handle_refresh_sources,
-    )
 
     hass.services.async_register(DOMAIN, "channel_up", handle_channel_up)
     hass.services.async_register(DOMAIN, "channel_down", handle_channel_down)

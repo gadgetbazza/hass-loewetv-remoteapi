@@ -26,6 +26,13 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+def xml_find(root: ET.Element, tag: str) -> str | None:
+    """Find XML element text by local-name, ignoring namespace prefix."""
+    for elem in root.iter():
+        if elem.tag.split("}")[-1] == tag:  # take text after namespace
+            return elem.text.strip() if elem.text else None
+    return None
+
 class LoeweTVCoordinator(DataUpdateCoordinator):
     """Loewe TV data coordinator."""
 
@@ -65,6 +72,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         self.tv_mac: str | None = None
         self._sources_lock = asyncio.Lock()
         self._avlist_view: str | None = None
+        self._device_info: dict[str, Any] = {}
+        self.device_name: str | None = None
+        
 
         # Restore from config entry if available
         entry = next(
@@ -244,26 +254,55 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
 
     # ---------- API methods ----------
     async def async_get_device_data(self) -> None:
-        """Fetch TV device data (MAC, etc.) and store it."""
+        """Fetch TV device data (MAC, chassis, SW version, etc.) and store it."""
         resp = await self._safe_soap_request("GetDeviceData", self._body_with_ids("GetDeviceData"))
         if not resp:
-            #_LOGGER.warning("LoeweTV: GetDeviceData failed")
             return
 
         try:
             root = ET.fromstring(resp)
             ns = {"ltv": "urn:loewe.de:RemoteTV:Tablet"}
-            mac_elem = (
-                root.find(".//ltv:MAC-Address-LAN", ns)
-                or root.find(".//ltv:MAC-Address", ns)
+
+            device_info = {
+                "Chassis": xml_find(root, "Chassis"),
+                "SW-Version": xml_find(root, "SW-Version"),
+                "MAC-Address": xml_find(root, "MAC-Address"),
+                "MAC-Address-LAN": xml_find(root, "MAC-Address-LAN"),
+                "MAC-Address-WLAN": xml_find(root, "MAC-Address-WLAN"),
+                "Location": xml_find(root, "Location"),
+                "NetworkHostName": xml_find(root, "NetworkHostName"),
+                "StreamingServerName": xml_find(root, "StreamingServerName"),
+                "OwnVolumeId": xml_find(root, "OwnVolumeId"),
+            }
+
+            # Store for later use
+            self._device_info = device_info
+
+            # Preserve backwards compatibility with tv_mac shortcut
+            self.tv_mac = (
+                device_info.get("MAC-Address-LAN")
+                or device_info.get("MAC-Address")
+                or None
             )
-            if mac_elem is not None and mac_elem.text:
-                self.tv_mac = mac_elem.text.strip()
-                _LOGGER.debug("LoeweTV: Retrieved TV MAC %s", self.tv_mac)
+
+            # Friendly name if available
+            if not getattr(self, "device_name", None):
+                self.device_name = device_info.get("NetworkHostName") or "Loewe TV"
+
+            # Debug identity card
+            _LOGGER.debug(
+                "LoeweTV device info: Chassis=%s, SW=%s, MAC=%s, LAN=%s, WLAN=%s",
+                device_info.get("Chassis"),
+                device_info.get("SW-Version"),
+                device_info.get("MAC-Address"),
+                device_info.get("MAC-Address-LAN"),
+                device_info.get("MAC-Address-WLAN"),
+            )
+
         except Exception as e:
             _LOGGER.error("LoeweTV: Error parsing GetDeviceData response: %s", e)
 
-   
+
     async def async_get_current_status(self) -> dict[str, str]:
         resp = await self._safe_soap_request("GetCurrentStatus", self._body_with_ids("GetCurrentStatus"))
         if not resp:
@@ -491,10 +530,14 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         return result
     
     async def async_channel_up(self) -> bool:
-        return await self.async_inject_rc_key(24)  # CH+ keycode
+        keycode = LOEWE_RC_CODES.get("prog_up")
+        if keycode is not None:
+            await self.async_inject_rc_key(keycode)
 
     async def async_channel_down(self) -> bool:
-        return await self.async_inject_rc_key(23)  # CH- keycode
+        keycode = LOEWE_RC_CODES.get("prog_down")
+        if keycode is not None:
+            await self.async_inject_rc_key(keycode)
 
     async def async_refresh_sources(self) -> None:
         """Force refresh of available sources (AV + tuner)."""
@@ -541,7 +584,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         volume = None
         mute = None
 
-        # ---------- Step 1: get current tv status ----------
+        # ---------- Step 0: get current tv status ----------
         try:
             status = await self.async_get_current_status()
         except Exception as e:
@@ -567,6 +610,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
                 "playback": {},
                 "available_sources": getattr(self, "_available_sources", []),
             }
+
+        # ---------- Step 1: get device info ----------
+        if not self._device_info:
+            await self.async_get_device_data()
 
         # ---------- Step 2: ensure sources ----------
         await self.async_ensure_available_sources(force=False)
@@ -596,6 +643,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
         # ---------- Step 5: get mute status ----------
         mute = await self.async_get_mute()
 
+
         # ---------- Sanity logging ----------
         if (
             not status
@@ -623,6 +671,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator):
             "status": status,
             "device": {"volume": volume, "mute": mute, "ha_state": ha_state},
             "playback": playback,
+            "available_sources": getattr(self, "_available_sources", []),
+            "current_source": self._current_locator
         }
 
         _LOGGER.debug("Update Data result: %s", result)

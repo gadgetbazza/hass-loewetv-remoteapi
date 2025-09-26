@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.const import STATE_UNKNOWN
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, RC_KEY_POWER_OFF, RC_KEY_POWER_ON
+from .const import DOMAIN, LOEWE_RC_CODES
 from .coordinator import LoeweTVCoordinator
 from .utils import async_send_wol
 
@@ -42,15 +42,24 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         super().__init__(coordinator)
         self.coordinator = coordinator
         self._entry = entry
-        self._attr_name = entry.title or "Loewe TV"
-        # use device_uuid for stable unique_id
-        self._attr_unique_id = coordinator.device_uuid or entry.entry_id
+        self._attr_unique_id = f"{entry.entry_id}_media"
+
+        # Prefer Loewe-reported hostname, fallback to entry title or default
+        device_info = coordinator._device_info or {}
+        self._attr_name = (
+            device_info.get("NetworkHostName")
+            or entry.title
+            or "Loewe TV"
+        )
+
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, self._attr_unique_id)},
+            "identifiers": {(DOMAIN, entry.entry_id)},   # unify here
             "manufacturer": "Loewe",
-            "model": "TV",
+            "model": device_info.get("Chassis", "TV"),
+            "sw_version": device_info.get("SW-Version", ""),
             "name": self._attr_name,
         }
+
 
     # ---------- State ----------
     @property
@@ -107,7 +116,9 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     async def async_turn_off(self) -> None:
         """Send discrete Power Off RC key."""
         _LOGGER.debug("LoeweTV: Sending RC POWER OFF")
-        await self.coordinator.async_inject_rc_key(RC_KEY_POWER_OFF)
+        keycode = LOEWE_RC_CODES.get("power_off")
+        if keycode is not None:
+            await self.coordinator.async_inject_rc_key(keycode)
 
     async def async_turn_on(self) -> None:
         """Wake TV via WOL, then send RC TV_ON (22) to leave network standby."""
@@ -122,7 +133,9 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
             _LOGGER.warning("LoeweTV: No TV MAC available for WOL")
 
         _LOGGER.debug("LoeweTV: Sending RC TV_ON")
-        await self.coordinator.async_inject_rc_key(RC_KEY_POWER_ON)
+        keycode = LOEWE_RC_CODES.get("power_on")
+        if keycode is not None:
+            await self.coordinator.async_inject_rc_key(keycode)
 
     async def async_set_volume_level(self, volume: float) -> None:
         raw_value = int(volume * 1_000_000)
