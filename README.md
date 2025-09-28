@@ -37,7 +37,7 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 1. Open **HACS → Integrations → Custom Repositories**.
 2. Add:  
    ```
-   https://github.com/gadgetbazza/hass-loewe-remoteapi
+   https://github.com/gadgetbazza/hass-loewetv-remoteapi
    ```
    with type **Integration**.
 3. Install **Loewe TV**.
@@ -78,7 +78,7 @@ logger:
 ---
 
 ## Support
-- Please report issues or feedback via [GitHub Issues](https://github.com/gadgetbazza/hass-loewe-remoteapi/issues).
+- Please report issues or feedback via [GitHub Issues](https://github.com/gadgetbazza/hass-loewetv-remoteapi/issues).
 - Contributions welcome!
 
 ---
