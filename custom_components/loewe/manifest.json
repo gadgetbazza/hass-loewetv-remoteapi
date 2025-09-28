@@ -10,6 +10,8 @@
   "iot_class": "local_polling",
   "integration_type": "device",
   "config_flow": true,
+  "requirements": [],
+  "dependencies": [],
   "loggers": [
     "custom_components.loewe"
   ]
