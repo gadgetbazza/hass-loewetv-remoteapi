@@ -2,7 +2,7 @@
 
 from homeassistant.const import Platform
 
-DOMAIN = "loewe_tv"
+DOMAIN = "loewe"
 
 CONF_HOST = "host"
 CONF_RESOURCE_PATH = "resource_path"
@@ -36,10 +36,10 @@ LOEWE_RC_CODES: dict[str, int] = {
     "ok": 38,
     "blue": 40,
     "yellow": 43,
-    "media": 49,
+    "media": 49, #Home
     "radio": 53,
     "ttx": 60,
-    "end": 63,
+    "end": 63, #Back
     "sound": 64,
     "back": 65,
     "info": 79,

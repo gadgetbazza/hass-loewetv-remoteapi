@@ -16,13 +16,20 @@ RC_BUTTONS = {
     "Volume Up": "volume_up",
     "Volume Down": "volume_down",
     "Mute": "mute",
+    "Channel Up": "prog_up",
+    "Channel Down": "prog_down",
     "Menu": "menu",
-    "Back": "back",
     "Info": "info",
     "Red": "red",
     "Green": "green",
     "Yellow": "yellow",
     "Blue": "blue",
+    "Right": "right",
+    "Left": "left",
+    "Up": "up",
+    "Down": "down",
+    "Home": "media",
+    "Back": "end"
 }
 
 async def async_setup_entry(

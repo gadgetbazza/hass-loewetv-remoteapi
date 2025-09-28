@@ -1,5 +1,5 @@
 {
-  "domain": "loewe_tv",
+  "domain": "loewe",
   "name": "Loewe TV Remote API",
   "version": "1.0.0",
   "documentation": "https://github.com/gadgetbazza/hass-loewetv-remoteapi",
@@ -11,6 +11,6 @@
   "integration_type": "device",
   "config_flow": true,
   "loggers": [
-    "custom_components.loewe_tv"
+    "custom_components.loewe"
   ]
 }

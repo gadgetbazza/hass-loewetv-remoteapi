@@ -22,6 +22,7 @@ from .const import (
     CONF_FCID,
     CONF_HOST,
     SOAP_ENDPOINTS,
+    LOEWE_RC_CODES,
 )
 
 _LOGGER = logging.getLogger(__name__)
