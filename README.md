@@ -40,13 +40,16 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
    https://github.com/gadgetbazza/hass-loewetv-remoteapi
    ```
    with type **Integration**.
-3. Install **Loewe TV**.
+3. Search for and Install **Loewe TV Remote API** within Hacs.
 4. Restart Home Assistant.
+5. Add the integration via **Settings → Devices & Services → Add Integration → Loewe TV Remote API**.
+6. Enter the IP address of your TV and press Submit.  (Your TV set will need to be powered on during this step)
 
 ### Manual Installation
 1. Copy `custom_components/loewe` into your Home Assistant `config/custom_components/` folder.
 2. Restart Home Assistant.
-3. Add the integration via **Settings → Devices & Services → Add Integration → Loewe TV**.
+3. Add the integration via **Settings → Devices & Services → Add Integration → Loewe TV Remote API**.
+4. Enter the IP address of your TV and press Submit.  (Your TV set will need to be powered on during this step)
 
 ---
 
