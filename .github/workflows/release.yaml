@@ -1,0 +1,76 @@
+name: Auto HACS Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'  # triggers only for version tags like v1.0.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # required to generate changelog
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+
+      - name: Update manifest.json version
+        run: |
+          python - <<EOF
+          import json
+          f = 'custom_components/loewe/manifest.json'
+          data = json.load(open(f))
+          data['version'] = "${{ env.VERSION }}"
+          with open(f, 'w') as out:
+              json.dump(data, out, indent=2)
+              out.write('\n')
+          EOF
+
+      - name: Commit manifest.json version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add custom_components/loewe/manifest.json
+          git commit -m "Update manifest version to ${{ env.VERSION }}" || echo "No changes to commit"
+          git push origin HEAD:main
+
+      - name: Generate changelog from commits
+        id: changelog
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tag found, using all commits."
+            git log --pretty=format:"- %s" > CHANGELOG.txt
+          else
+            git log $LAST_TAG..HEAD --pretty=format:"- %s" > CHANGELOG.txt
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat CHANGELOG.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Loewe TV Remote API ${{ env.VERSION }}"
+          body: |
+            🆕 **Version:** ${{ env.VERSION }}
+
+            This release was automatically generated for HACS.
+
+            **Changelog:**
+            ${{ steps.changelog.outputs.changelog }}
+          draft: false
+          prerelease: false
