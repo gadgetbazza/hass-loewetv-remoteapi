@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import logging
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.typing import ConfigType
-from homeassistant.helpers import service
+from .coordinator import LoeweTVCoordinator
+from .network import async_get_device_mac
 
 from .const import (
     DOMAIN,
@@ -16,16 +17,12 @@ from .const import (
     CONF_FCID,
     CONF_TV_MAC,
     PLATFORMS,
-    DEFAULT_RESOURCE_PATH,
 )
-
-from .coordinator import LoeweTVCoordinator
-from .utils import async_get_device_uuid
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Loewe TV integration (YAML not supported)."""
     hass.data.setdefault(DOMAIN, {})
     return True
@@ -36,43 +33,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = entry.data[CONF_HOST]
     resource_path = entry.data.get(CONF_RESOURCE_PATH, "/loewe_tablet_0001")
     client_id = entry.data.get(CONF_CLIENT_ID)
-    device_uuid = entry.data.get(CONF_DEVICE_UUID) or await async_get_device_uuid(hass)
+    device_uuid = entry.data.get(CONF_DEVICE_UUID) or await async_get_device_mac(hass)
     fcid = entry.data.get(CONF_FCID)
 
     _LOGGER.debug(
-        "async_setup_entry: host=%s resource_path=%s client_id=%s device_uuid=%s",
-        host, resource_path, client_id, device_uuid
+        "async_setup_entry: host=%s resource_path=%s client_id=%s device_uuid=%s fcid=%s",
+        host, resource_path, client_id, device_uuid, fcid
     )
 
-    coordinator = LoeweTVCoordinator(
-        hass,
-        host=host,
-        resource_path=resource_path,
-    )
+    # --- Verify stored DeviceUUID (MAC) matches current ---
+    current_mac = await async_get_device_mac(hass)
+    stored_uuid = entry.data.get(CONF_DEVICE_UUID)
 
-    # Load the persisted TV MAC captured during the config flow
+    if stored_uuid and stored_uuid.lower() != current_mac.lower():
+        _LOGGER.warning(
+            "Stored DeviceUUID (%s) does not match current MAC (%s) — "
+            "re-pairing may be required.",
+            stored_uuid, current_mac,
+        )
+        # Optionally, trigger re-pair automatically
+        entry_data = dict(entry.data)
+        entry_data[CONF_DEVICE_UUID] = current_mac
+        hass.config_entries.async_update_entry(entry, data=entry_data)
+
+    coordinator = LoeweTVCoordinator(hass, host=host, resource_path=resource_path, entry=entry)
+    coordinator.client_id = client_id
+    coordinator.fcid = fcid
+    coordinator.device_uuid = device_uuid
+
+    # Load persisted TV MAC captured during config flow
     coordinator.tv_mac = entry.data.get(CONF_TV_MAC)
 
-    # 🔹 Fetch static device info early
-    await coordinator.async_get_device_data()
-
-    # 🔹 Make sure session is valid before we start updates
+    # Ensure valid session before fetching device data
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # Forward setups to supported platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # --- Register services ---
+    # Register services
     async def handle_channel_up(call):
+        """Handle channel up service call."""
         await coordinator.async_channel_up()
 
     async def handle_channel_down(call):
+        """Handle channel down service call."""
         await coordinator.async_channel_down()
 
     async def handle_refresh_sources(call):
         """Handle manual refresh of AV and channel sources."""
         target_entity_ids = call.data.get("entity_id")
-
         if not target_entity_ids or any(
             eid.endswith(entry.entry_id) for eid in target_entity_ids
         ):
@@ -85,6 +96,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     return True
 
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Loewe TV config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
@@ -92,4 +104,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator: LoeweTVCoordinator = hass.data[DOMAIN].pop(entry.entry_id)
         await coordinator.async_close()
     return unload_ok
-

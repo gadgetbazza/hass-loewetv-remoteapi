@@ -14,9 +14,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN, LOEWE_RC_CODES
 from .coordinator import LoeweTVCoordinator
-from .utils import async_send_wol
+from .network import async_send_wol
 
 _LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities
@@ -44,36 +45,31 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_media"
 
-        # Prefer Loewe-reported hostname, fallback to entry title or default
         device_info = coordinator._device_info or {}
         self._attr_name = (
-            device_info.get("NetworkHostName")
-            or entry.title
-            or "Loewe TV"
+            device_info.get("NetworkHostName") or entry.title or "Loewe TV"
         )
 
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},   # unify here
+            "identifiers": {(DOMAIN, entry.entry_id)},
             "manufacturer": "Loewe",
             "model": device_info.get("Chassis", "TV"),
             "sw_version": device_info.get("SW-Version", ""),
             "name": self._attr_name,
         }
 
-
     # ---------- State ----------
     @property
-    def state(self) -> str | None:
+    def state(self) -> str:
         device = (self.coordinator.data or {}).get("device", {})
         return device.get("ha_state", STATE_UNKNOWN)
 
     @property
     def volume_level(self) -> float | None:
         device = (self.coordinator.data or {}).get("device", {})
-        volume = device.get("volume")
-        if volume is not None:
+        if (volume := device.get("volume")) is not None:
             level = volume / 1_000_000
-            return min(max(level, 0.0), 1.0)  # clamp to [0,1]
+            return max(0.0, min(level, 1.0))  # clamp to [0,1]
         return None
 
     @property
@@ -101,102 +97,99 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
         if not loc:
             return None
 
-        # First check AV sources
         for src in self.coordinator.available_sources:
             if src["locator"] == loc:
                 return src["name"]
 
-        # If not found but matches last known TV tuner locator → treat as "TV"
         if loc == getattr(self.coordinator, "_last_tv_locator", None):
             return "TV"
-
         return None
 
     # ---------- Commands ----------
     async def async_turn_off(self) -> None:
         """Send discrete Power Off RC key."""
-        _LOGGER.debug("LoeweTV: Sending RC POWER OFF")
-        keycode = LOEWE_RC_CODES.get("power_off")
-        if keycode is not None:
-            await self.coordinator.async_inject_rc_key(keycode)
+        if (keycode := LOEWE_RC_CODES.get("power_off")) is not None:
+            if await self.coordinator.async_inject_rc_key(keycode):
+                # Optimistically update state
+                self.coordinator.data.get("device", {})["ha_state"] = "off"
+                self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
-        """Wake TV via WOL, then send RC TV_ON (22) to leave network standby."""
+        """Turn on the Loewe TV using Wake-on-LAN and a discrete RC key (22)."""
         mac = self.coordinator.tv_mac
-        if mac:
-            _LOGGER.debug("LoeweTV: Sending WOL to %s", mac)
-            try:
-                await async_send_wol(self.hass, mac)
-            except Exception as e:
-                _LOGGER.warning("LoeweTV: Failed to send WOL to %s: %s", mac, e)
-        else:
-            _LOGGER.warning("LoeweTV: No TV MAC available for WOL")
+        wol_sent = False
 
-        _LOGGER.debug("LoeweTV: Sending RC TV_ON")
-        keycode = LOEWE_RC_CODES.get("power_on")
-        if keycode is not None:
-            await self.coordinator.async_inject_rc_key(keycode)
+        # --- Step 1: Send Wake-on-LAN (if MAC known) ---
+        if mac:
+            try:
+                from .network import async_send_wol
+                _LOGGER.debug("Sending Wake-on-LAN to %s", mac)
+                await async_send_wol(mac)
+                wol_sent = True
+            except Exception as e:
+                _LOGGER.warning("Failed to send WOL packet: %s", e)
+        else:
+            _LOGGER.debug("No MAC address available for WOL; skipping")
+
+        # --- Step 2: Optional delay to let NIC wake up ---
+        if wol_sent:
+            _LOGGER.debug("WOL sent, waiting 1.0s before sending RC Power On")
+            await asyncio.sleep(1.0)
+
+        # --- Step 3: Send discrete Power On RC key (22) ---
+        try:
+            if (keycode := LOEWE_RC_CODES.get("power_on")) is not None:
+                await self.coordinator.async_inject_rc_key(keycode)
+                _LOGGER.debug("Sent RC key %s (Discrete Power On) after WOL", keycode)
+        except Exception as e:
+            _LOGGER.warning("Failed to send RC Power On key: %s", e)
 
     async def async_set_volume_level(self, volume: float) -> None:
         raw_value = int(volume * 1_000_000)
         if await self.coordinator.async_set_volume(raw_value):
-            # Optimistically update coordinator state
-            device = self.coordinator.data.get("device", {})
-            device["volume"] = raw_value
+            # Optimistically update
+            self.coordinator.data.get("device", {})["volume"] = raw_value
             self.async_write_ha_state()
 
     async def async_mute_volume(self, mute: bool) -> None:
         if await self.coordinator.async_set_mute(mute):
-            # Optimistically update coordinator state
-            device = self.coordinator.data.get("device", {})
-            device["mute"] = mute
+            # Optimistically update
+            self.coordinator.data.get("device", {})["mute"] = mute
             self.async_write_ha_state()
 
     async def async_select_source(self, source: str) -> None:
         """Switch TV input or AV source."""
         if source == "TV":
-            locator = getattr(self.coordinator, "_last_tv_locator", None)
-
+            locator = getattr(self.coordinator, "_last_tv_locator", None) or await self.coordinator.async_get_first_tv_channel()
             if not locator:
-                # Fall back to first channel from Freeview (or favlist)
-                locator = await self.coordinator.async_get_first_tv_channel()
-                if locator:
-                    _LOGGER.debug("LoeweTV: Using fallback first TV channel %s", locator)
-                else:
-                    _LOGGER.warning("LoeweTV: No TV channels available to zap to")
-                    return
+                _LOGGER.warning("No TV channels available to zap to")
+                return
 
-            _LOGGER.debug("LoeweTV: Switching to TV channel %s", locator)
             if await self.coordinator.async_set_channel(locator):
+                # Optimistically update
+                self._attr_source = "TV"
                 self.async_write_ha_state()
             else:
-                _LOGGER.warning("LoeweTV: Zap to TV channel %s failed", locator)
-                # Revert state back to previous source
+                _LOGGER.warning("Zap to TV channel %s failed", locator)
                 self.async_write_ha_state()
             return
 
-        # Otherwise, look through AV sources
         for src in self.coordinator.available_sources:
             if src["name"] == source:
                 locator = src["locator"]
-                _LOGGER.debug("LoeweTV: Switching source to %s (%s)", source, locator)
                 if await self.coordinator.async_set_channel(locator):
+                    # Optimistically update
+                    self._attr_source = source
                     self.async_write_ha_state()
                 else:
-                    _LOGGER.warning("LoeweTV: Zap to %s (%s) failed", source, locator)
-                    # Revert state back
+                    _LOGGER.warning("Zap to %s (%s) failed", source, locator)
                     self.async_write_ha_state()
                 return
 
-        _LOGGER.warning("LoeweTV: Requested source %s not found", source)
+        _LOGGER.warning("Requested source %s not found", source)
 
     async def async_channel_up(self) -> None:
-        """Send channel up command."""
-        _LOGGER.debug("LoeweTV: Channel Up pressed")
         await self.coordinator.async_channel_up()
 
     async def async_channel_down(self) -> None:
-        """Send channel down command."""
-        _LOGGER.debug("LoeweTV: Channel Down pressed")
         await self.coordinator.async_channel_down()
-
