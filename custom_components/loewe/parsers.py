@@ -69,7 +69,7 @@ def parse_status(xml: Optional[str]) -> dict[str, Any]:
     if power in ("tv", "on"):
         result["ha_state"] = MediaPlayerState.ON
     elif power in ("standby", "off", "idle"):
-        result["ha_state"] = MediaPlayerState.STANDBY
+        result["ha_state"] = MediaPlayerState.IDLE
     else:
         result["ha_state"] = MediaPlayerState.OFF
 
