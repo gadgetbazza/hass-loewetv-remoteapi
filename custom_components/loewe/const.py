@@ -1,15 +1,17 @@
 """Constants for Loewe TV integration."""
 
 from homeassistant.const import Platform
+from typing import Final, Set
 
 DOMAIN = "loewe"
 
 CONF_HOST = "host"
 CONF_RESOURCE_PATH = "resource_path"
 CONF_CLIENT_ID = "client_id"
-CONF_DEVICE_UUID = "device_uuid"  # Actually contains the client MAC, not UUID.
+CONF_DEVICE_UUID = "device_uuid"
 CONF_FCID = "fcid"
 CONF_TV_MAC = "tv_mac"
+CONF_CLIENT_MAC = "client_mac"
 
 DEFAULT_RESOURCE_PATH = "/loewe_tablet_0001"
 DEFAULT_POLL_INTERVAL = 10
@@ -72,3 +74,10 @@ PLATFORMS: list[Platform] = [
 SOAP_BASE_URL = "http://{host}:905/loewe_tablet_0001"
 SOAP_SERVICE = "urn:loewe.de:RemoteTV:Tablet"
 SOAP_PREFIX = "ltv"
+
+# Fields that should never be exposed in plain text (used by diagnostics)
+TO_REDACT: Final[Set[str]] = {
+    "client_id",
+    "ClientId",  # Loewe API variant
+    "fcid",
+}

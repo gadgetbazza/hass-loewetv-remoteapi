@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import logging
+import asyncio
 
 from homeassistant.components.media_player import (
     MediaPlayerEntity,
@@ -124,12 +125,12 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
             try:
                 from .network import async_send_wol
                 _LOGGER.debug("Sending Wake-on-LAN to %s", mac)
-                await async_send_wol(mac)
+                await async_send_wol(self.coordinator.hass, mac)
                 wol_sent = True
             except Exception as e:
                 _LOGGER.warning("Failed to send WOL packet: %s", e)
         else:
-            _LOGGER.debug("No MAC address available for WOL; skipping")
+            _LOGGER.debug("No TV MAC address available for WOL; skipping")
 
         # --- Step 2: Optional delay to let NIC wake up ---
         if wol_sent:

@@ -19,6 +19,7 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_FCID,
     CONF_TV_MAC,
+    CONF_CLIENT_MAC,
     DEFAULT_RESOURCE_PATH,
 )
 from .coordinator import LoeweTVCoordinator
@@ -86,28 +87,54 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "pairing_not_accepted"
             return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA, errors=errors)
 
+        # ----------------------------
+        # Build the initial config data
+        # ----------------------------
         data = {
             CONF_HOST: host,
             CONF_RESOURCE_PATH: resource_path,
             CONF_CLIENT_ID: result.get("ClientId"),
-            CONF_DEVICE_UUID: coordinator.device_uuid,  # actually MAC in this design
             CONF_FCID: result.get("fcid"),
         }
 
-        # Fetch and persist the TV's MAC so WOL works
+        # ----------------------------
+        # Capture the TV's MAC address
+        # ----------------------------
         try:
-            device_info = await coordinator.async_get_device_data()
-            mac = device_info.get("MAC-Address-LAN") or device_info.get("MAC-Address")
+            # Reconnect temporarily to ensure GetDeviceData works after pairing
+            temp_coordinator = LoeweTVCoordinator(self.hass, host=host, resource_path=resource_path)
+            device_info = await temp_coordinator.async_get_device_data()
+            await temp_coordinator.async_close()
+
+            mac = device_info.get("MAC-Address")
             if mac:
                 data[CONF_TV_MAC] = mac.strip()
                 _LOGGER.debug("Captured TV MAC during config flow: %s", data[CONF_TV_MAC])
         except Exception as e:
-            _LOGGER.warning("Could not parse MAC from GetDeviceData: %s", e)
+            _LOGGER.warning("Could not parse TV MAC from GetDeviceData: %s", e)
 
+        # ----------------------------
+        # Capture the HA client's MAC address
+        # ----------------------------
+        try:
+            from .network import _read_iface_mac, _get_default_route_iface
+
+            iface = _get_default_route_iface()
+            client_mac = _read_iface_mac(iface) if iface else None
+            if client_mac:
+                data[CONF_CLIENT_MAC] = client_mac
+                _LOGGER.debug("Captured HA Client MAC during config flow: %s", data[CONF_CLIENT_MAC])
+        except Exception as e:
+            _LOGGER.debug("Could not determine HA Client MAC: %s", e)
+
+        # ----------------------------
+        # Final logging and entry creation
+        # ----------------------------
         _LOGGER.debug(
-            "Pairing success: ClientId=%s DeviceUUID=%s State=%s",
+            "Pairing success: ClientId=%s TV_MAC=%s CLIENT_MAC=%s State=%s",
             data.get(CONF_CLIENT_ID),
-            data.get(CONF_DEVICE_UUID),
+            data.get(CONF_TV_MAC),
+            data.get(CONF_CLIENT_MAC),
             result.get("State"),
         )
 

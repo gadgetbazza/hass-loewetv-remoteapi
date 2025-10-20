@@ -16,6 +16,7 @@ from .const import (
     CONF_DEVICE_UUID,
     CONF_FCID,
     CONF_TV_MAC,
+    CONF_CLIENT_MAC,
     PLATFORMS,
 )
 
@@ -33,39 +34,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     host = entry.data[CONF_HOST]
     resource_path = entry.data.get(CONF_RESOURCE_PATH, "/loewe_tablet_0001")
     client_id = entry.data.get(CONF_CLIENT_ID)
-    device_uuid = entry.data.get(CONF_DEVICE_UUID) or await async_get_device_mac(hass)
+    client_mac = entry.data.get(CONF_CLIENT_MAC) or await async_get_device_mac(hass)
     fcid = entry.data.get(CONF_FCID)
 
     _LOGGER.debug(
-        "async_setup_entry: host=%s resource_path=%s client_id=%s device_uuid=%s fcid=%s",
-        host, resource_path, client_id, device_uuid, fcid
+        "async_setup_entry: host=%s resource_path=%s client_id=%s client_mac=%s fcid=%s",
+        host, resource_path, client_id, client_mac, fcid
     )
 
-    # --- Verify stored DeviceUUID (MAC) matches current ---
+    # --- Verify stored Client MAC matches current ---
     current_mac = await async_get_device_mac(hass)
-    stored_uuid = entry.data.get(CONF_DEVICE_UUID)
 
-    if stored_uuid and stored_uuid.lower() != current_mac.lower():
+    if client_mac and client_mac.lower() != current_mac.lower():
         _LOGGER.warning(
-            "Stored DeviceUUID (%s) does not match current MAC (%s) — "
+            "Stored Client MAC (%s) does not match current MAC (%s) — "
             "re-pairing may be required.",
-            stored_uuid, current_mac,
+            client_mac, current_mac,
         )
         # Optionally, trigger re-pair automatically
         entry_data = dict(entry.data)
-        entry_data[CONF_DEVICE_UUID] = current_mac
+        entry_data[CONF_CLIENT_MAC] = current_mac
         hass.config_entries.async_update_entry(entry, data=entry_data)
 
     coordinator = LoeweTVCoordinator(hass, host=host, resource_path=resource_path, entry=entry)
     coordinator.client_id = client_id
     coordinator.fcid = fcid
-    coordinator.device_uuid = device_uuid
+    coordinator.client_mac = current_mac
 
     # Load persisted TV MAC captured during config flow
     coordinator.tv_mac = entry.data.get(CONF_TV_MAC)
 
     # Ensure valid session before fetching device data
     await coordinator.async_config_entry_first_refresh()
+
+    # Backfill missing tv_mac into config entry if later discovered
+    try:
+        if not entry.data.get(CONF_TV_MAC) and getattr(coordinator, "tv_mac", None):
+            hass.config_entries.async_update_entry(
+                entry,
+                data={**entry.data, CONF_TV_MAC: coordinator.tv_mac},
+            )
+            _LOGGER.debug("Backfilled missing tv_mac into config entry: %s", coordinator.tv_mac)
+    except Exception as e:
+        _LOGGER.debug("tv_mac backfill skipped: %s", e)
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 

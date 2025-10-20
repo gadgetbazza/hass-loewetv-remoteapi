@@ -128,10 +128,10 @@ class LoeweSoapClient:
 
         # Try to use the TV’s actual MAC for DeviceUUID
         try:
-            device_uuid = await async_get_device_mac(self.hass)
+            client_mac = await async_get_device_mac(self.hass)
         except Exception as e:
-            _LOGGER.warning("Unable to get MAC for DeviceUUID: %s", e)
-            device_uuid = "001122334455"
+            _LOGGER.warning("Unable to get MAC for Client: %s", e)
+            client_mac = "001122334455"
 
         # Legacy Loewe envelope (uses text/xml instead of application/soap+xml)
         envelope = f"""<?xml version="1.0" encoding="utf-8"?>
@@ -146,7 +146,7 @@ class LoeweSoapClient:
       <ClientId>{client_seed}</ClientId>
       <DeviceType>{device_name[:40]}</DeviceType>
       <DeviceName>{device_name[:40]}</DeviceName>
-      <DeviceUUID>{device_uuid}</DeviceUUID>
+      <DeviceUUID>{client_mac}</DeviceUUID>
       <RequesterName>Home Assistant Loewe TV Integration</RequesterName>
     </RequestAccess>
   </SOAP-ENV:Body>

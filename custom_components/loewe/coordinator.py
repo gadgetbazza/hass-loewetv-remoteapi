@@ -5,9 +5,10 @@ from datetime import timedelta
 from typing import Any, Optional
 from .soap import LoeweSoapClient
 from . import parsers
-from .const import SOAP_PREFIX, DEFAULT_POLL_INTERVAL
+from .const import SOAP_PREFIX, DEFAULT_POLL_INTERVAL, CONF_TV_MAC, CONF_CLIENT_MAC
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.components.media_player import MediaPlayerState
 
 import logging
 import asyncio
@@ -39,9 +40,33 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_raw_response: Optional[str] = None
 
         # Session IDs
-        self.device_uuid: Optional[str] = None  # (actually MAC)
+        self.client_mac: Optional[str] = None
         self.client_id: Optional[str] = None
         self.fcid: Optional[str] = None
+        
+        # --- Added: Load persisted MACs from config entry (minimal insertion) ---
+        try:
+            self.tv_mac = (
+                self._entry.data.get(CONF_TV_MAC)
+                if self._entry and hasattr(self._entry, "data")
+                else None
+            )
+            self.client_mac = (
+                self._entry.data.get(CONF_CLIENT_MAC)
+                if self._entry and hasattr(self._entry, "data")
+                else None
+            )
+            _LOGGER.debug(
+                "Loaded persisted MACs: tv_mac=%s, client_mac=%s",
+                self.tv_mac,
+                self.client_mac,
+            )
+        except Exception as e:
+            self.tv_mac = None
+            self.client_mac = None
+            _LOGGER.debug("Failed to load MACs from entry: %s", e)
+        # --- End Added ---
+
 
     # ---------------------- Polling ----------------------
 
@@ -51,7 +76,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Polling Loewe TV (ClientId=%s, FCID=%s, UUID=%s)",
             self.client_id,
             self.fcid,
-            self.device_uuid,
+            self.client_mac,
         )
 
         # --- Step 1: status first (determines power/session validity)
