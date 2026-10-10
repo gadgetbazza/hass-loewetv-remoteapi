@@ -4,48 +4,35 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.diagnostics import async_redact_data
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import DOMAIN, CONF_TV_MAC, CONF_CLIENT_MAC, CONF_DEVICE_UUID, TO_REDACT
+from .const import TO_REDACT
+from .coordinator import LoeweConfigEntry
 
-def _deep_redact(obj: Any) -> Any:
-    """Recursively redact any field whose name matches entries in TO_REDACT."""
-    if isinstance(obj, dict):
-        return {
-            k: (
-                "**REDACTED**"
-                if any(red.lower() in k.lower() for red in TO_REDACT)
-                else _deep_redact(v)
-            )
-            for k, v in obj.items()
-        }
-    if isinstance(obj, list):
-        return [_deep_redact(v) for v in obj]
-    return obj
 
 async def async_get_config_entry_diagnostics(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant, entry: LoeweConfigEntry
 ) -> dict[str, Any]:
-    """Return diagnostics for a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    device_info = getattr(coordinator, "_device_info", {})
-
+    """Return diagnostics for a config entry (session IDs and MACs redacted)."""
+    coordinator = entry.runtime_data
     data: dict[str, Any] = {
         "entry": entry.as_dict(),
-        "coordinator": {
-            "host": getattr(coordinator, "host", None),
-            "resource_path": getattr(coordinator, "resource_path", None),
-            "client_id": getattr(coordinator, "client_id", None),
-            "fcid": getattr(coordinator, "fcid", None),
-            "tv_mac": getattr(coordinator, "tv_mac", None),
-            "client_mac": getattr(coordinator, "client_mac", None),
+        "connection": {
+            "host": coordinator.soap.host,
+            "resource_path": coordinator.soap.resource_path,
+            "url": coordinator.soap.url,
+            "client_id": coordinator.client_id,
+            "fcid": coordinator.fcid,
+            "tv_mac": coordinator.tv_mac,
+            "client_mac": coordinator.client_mac,
+            "last_update_success": coordinator.last_update_success,
         },
-        "device_info": device_info,
-        "status": getattr(coordinator, "data", {}),
+        "device_info": coordinator._device_info,
+        "sources": {
+            "av_inputs": [src["name"] for src in coordinator.available_sources],
+            "favourite_channels": len(coordinator.favourite_channels),
+            "all_channels": len(coordinator.all_channels),
+        },
+        "data": coordinator.data,
     }
-
-    # Redact sensitive information deeply
-    redacted = async_redact_data(data, TO_REDACT)
-    return _deep_redact(redacted)
-
+    return async_redact_data(data, TO_REDACT)

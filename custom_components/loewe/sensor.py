@@ -6,20 +6,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import LoeweTVCoordinator
-from .const import DOMAIN
+from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant, entry: LoeweConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up Loewe TV sensors from a config entry."""
-    coordinator: LoeweTVCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     async_add_entities(
         [CurrentServiceSensor(coordinator, entry), CurrentProgrammeSensor(coordinator, entry)]
     )
@@ -37,7 +35,7 @@ class CurrentServiceSensor(CoordinatorEntity, SensorEntity):
     _attr_has_entity_name = True
     _attr_name = "Current Service"
 
-    def __init__(self, coordinator: LoeweTVCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: LoeweTVCoordinator, entry: LoeweConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry_id = entry.entry_id
         self._attr_unique_id = f"{entry.entry_id}_service"
@@ -56,7 +54,7 @@ class CurrentProgrammeSensor(CoordinatorEntity, SensorEntity):
     _attr_name = "Current Programme"
     _attr_icon = "mdi:television-guide"
 
-    def __init__(self, coordinator: LoeweTVCoordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator: LoeweTVCoordinator, entry: LoeweConfigEntry) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_programme"
         self._attr_device_info = coordinator.device_info
