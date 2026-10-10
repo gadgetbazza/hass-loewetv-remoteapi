@@ -16,7 +16,10 @@ from .const import (
     CONF_CLIENT_MAC,
     CONF_CLIENT_ID,
     CONF_FCID,
+    LOEWE_RC_CODES,
 )
+from .network import async_send_wol
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -28,29 +31,34 @@ import time
 
 _LOGGER = logging.getLogger(__name__)
 
+type LoeweConfigEntry = ConfigEntry[LoeweTVCoordinator]
+
 
 class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Manages Loewe TV session, state, and polling."""
 
-    def __init__(self, hass: HomeAssistant, host: str, resource_path: str, entry=None) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        resource_path: str,
+        entry: ConfigEntry | None = None,
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name="Loewe TV Coordinator",
             update_interval=timedelta(seconds=DEFAULT_POLL_INTERVAL),
         )
-        self.hass = hass
         self._entry = entry
         self.soap = LoeweSoapClient(hass, host, resource_path)
 
         # Cached and runtime state
         self.available_sources: list[dict[str, str]] = []
         self.current_locator: Optional[str] = None
-        self._last_tv_locator: Optional[str] = None
+        self.last_tv_locator: Optional[str] = None
         self._device_info: dict[str, Any] = {}
-        self.tv_mac: Optional[str] = None
         self.device_name: Optional[str] = None
-        self._last_raw_response: Optional[str] = None
         self._reachable = True
 
         # Channel lists (loaded with the AV sources) and the now-playing cache
@@ -66,34 +74,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_expires = 0.0
         self._channel_changed_at = 0.0
 
-        # Session IDs
-        self.client_mac: Optional[str] = None
-        self.client_id: Optional[str] = None
-        self.fcid: Optional[str] = None
-        
-        # --- Added: Load persisted MACs from config entry (minimal insertion) ---
-        try:
-            self.tv_mac = (
-                self._entry.data.get(CONF_TV_MAC)
-                if self._entry and hasattr(self._entry, "data")
-                else None
-            )
-            self.client_mac = (
-                self._entry.data.get(CONF_CLIENT_MAC)
-                if self._entry and hasattr(self._entry, "data")
-                else None
-            )
-            _LOGGER.debug(
-                "Loaded persisted MACs: tv_mac=%s, client_mac=%s",
-                self.tv_mac,
-                self.client_mac,
-            )
-        except Exception as e:
-            self.tv_mac = None
-            self.client_mac = None
-            _LOGGER.debug("Failed to load MACs from entry: %s", e)
-        # --- End Added ---
-
+        # Session IDs and MACs persisted in the config entry (none during the config flow)
+        data = entry.data if entry else {}
+        self.client_id: Optional[str] = data.get(CONF_CLIENT_ID)
+        self.fcid: Optional[str] = data.get(CONF_FCID)
+        self.tv_mac: Optional[str] = data.get(CONF_TV_MAC)
+        self.client_mac: Optional[str] = data.get(CONF_CLIENT_MAC)
 
     # ---------------------- Polling ----------------------
 
@@ -150,9 +136,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if playback and (locator := playback.get("Locator")):
             av_locators = {s["locator"] for s in self.available_sources if "locator" in s}
             if locator not in av_locators:
-                if locator != self._last_tv_locator:
+                if locator != self.last_tv_locator:
                     _LOGGER.debug("Updating last TV locator to %s", locator)
-                    self._last_tv_locator = locator
+                    self.last_tv_locator = locator
 
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
@@ -185,7 +171,6 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
         }
 
-        self._last_raw_response = self.soap._last_raw_response
         return data
 
     @property
@@ -285,7 +270,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for src in self.available_sources:
             if src["locator"] == loc:
                 return src["name"]
-        if loc == self._last_tv_locator:
+        if loc == self.last_tv_locator:
             return "TV"
         return None
 
@@ -311,20 +296,40 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return bool(ok)
 
     async def async_inject_rc_key(self, value: int) -> bool:
-        """Inject a remote control key press/release sequence."""
-        _LOGGER.debug("Sending RC key %s", value)
+        """Inject a remote control key press/release sequence.
 
+        Holding a key is not possible: on the TV tested, a press and a later
+        release still count as a single key press.
+        """
+        _LOGGER.debug("Sending RC key %s", value)
         extra = (
             "<ltv:InputEventSequence>"
-            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{value}\" mode=\"press\"/>"
-            f"<ltv:RCKeyEvent alphabet=\"l2700\" value=\"{value}\" mode=\"release\"/>"
+            f'<ltv:RCKeyEvent alphabet="l2700" value="{value}" mode="press"/>'
+            f'<ltv:RCKeyEvent alphabet="l2700" value="{value}" mode="release"/>'
             "</ltv:InputEventSequence>"
         )
-
         resp = await self._safe_request("InjectRCKey", extra_xml=extra)
         success = bool(resp)
         _LOGGER.debug("InjectRCKey %s", "succeeded" if success else "failed")
         return success
+
+    async def async_power_off(self) -> bool:
+        """Put the TV into standby with the discrete power-off key."""
+        return await self.async_inject_rc_key(LOEWE_RC_CODES["power_off"])
+
+    async def async_power_on(self) -> bool:
+        """Wake the TV: Wake-on-LAN (if the MAC is known), then the discrete power-on key."""
+        if self.tv_mac:
+            try:
+                _LOGGER.debug("Sending Wake-on-LAN to %s", self.tv_mac)
+                await async_send_wol(self.hass, self.tv_mac)
+                # Give the network interface a moment to wake up
+                await asyncio.sleep(1.0)
+            except OSError as err:
+                _LOGGER.warning("Failed to send Wake-on-LAN packet: %s", err)
+        else:
+            _LOGGER.debug("No TV MAC address known; skipping Wake-on-LAN")
+        return await self.async_inject_rc_key(LOEWE_RC_CODES["power_on"])
 
     # ---------------------- Sources / Channels ----------------------
 
@@ -522,7 +527,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.current_locator = locator
             self.current_channel = self.lookup_channel(locator)
             if self.current_channel:
-                self._last_tv_locator = locator  # remember last TV channel
+                self.last_tv_locator = locator  # remember last TV channel
             self._event_locator = None
             await self.async_request_refresh()
             if self._entry:
@@ -557,18 +562,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
 
     async def async_channel_up(self) -> None:
-        from .const import LOEWE_RC_CODES
-        key = LOEWE_RC_CODES.get("prog_up")
-        if key is not None:
-            await self.async_inject_rc_key(key)
+        await self.async_inject_rc_key(LOEWE_RC_CODES["prog_up"])
 
     async def async_channel_down(self) -> None:
-        from .const import LOEWE_RC_CODES
-        key = LOEWE_RC_CODES.get("prog_down")
-        if key is not None:
-            await self.async_inject_rc_key(key)
-
-    # ---------------------- Close out / Clean Up ----------------------
-
-    async def async_close(self) -> None:
-        await self.soap.async_close()
+        await self.async_inject_rc_key(LOEWE_RC_CODES["prog_down"])

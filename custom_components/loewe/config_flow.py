@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import xml.etree.ElementTree as ET
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.device_registry import format_mac
 
 from .const import (
     DOMAIN,
     CONF_HOST,
     CONF_RESOURCE_PATH,
     CONF_CLIENT_ID,
-    CONF_DEVICE_UUID,
     CONF_FCID,
     CONF_TV_MAC,
     CONF_CLIENT_MAC,
@@ -54,9 +53,8 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             user_input.get(CONF_RESOURCE_PATH, DEFAULT_RESOURCE_PATH) or DEFAULT_RESOURCE_PATH
         ).strip()
 
-        # Avoid duplicates
-        await self.async_set_unique_id(f"{DOMAIN}-{host}")
-        self._abort_if_unique_id_configured()
+        # Avoid duplicates before pairing; the TV MAC (checked below) is the real unique ID
+        self._async_abort_entries_match({CONF_HOST: host})
 
         coordinator = LoeweTVCoordinator(self.hass, host=host, resource_path=resource_path)
 
@@ -81,8 +79,6 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             _LOGGER.error("RequestAccess failed: %s", err)
             errors["base"] = "cannot_connect"
             return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA, errors=errors)
-        finally:
-            await coordinator.async_close()
 
         if not result:
             _LOGGER.error("RequestAccess returned no result after all attempts")
@@ -111,8 +107,13 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if tv_mac := device_mac(device_info):
             data[CONF_TV_MAC] = tv_mac
             _LOGGER.debug("Captured TV MAC during config flow: %s", tv_mac)
+            # Same TV on a new IP address: update the existing entry instead of adding another
+            await self.async_set_unique_id(format_mac(tv_mac))
+            self._abort_if_unique_id_configured(updates={CONF_HOST: host})
         else:
             _LOGGER.warning("Could not read TV MAC from GetDeviceData; it will be filled in on a later poll")
+            await self.async_set_unique_id(f"{DOMAIN}-{host}")
+            self._abort_if_unique_id_configured()
 
         # ----------------------------
         # Capture the HA client's MAC address (sent as DeviceUUID when pairing)

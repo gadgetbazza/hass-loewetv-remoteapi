@@ -1,7 +1,11 @@
 """SOAP client for Loewe TV (stateless transport layer)."""
 
 from __future__ import annotations
-from typing import Any, Optional
+from typing import Optional
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
 from . import parsers
 from .const import DEFAULT_RESOURCE_PATH, SOAP_BASE_URL, SOAP_PORT, SOAP_SERVICE, SOAP_PREFIX
 from .network import async_get_device_mac
@@ -22,24 +26,11 @@ class LoeweSoapClient:
         path = (resource_path or DEFAULT_RESOURCE_PATH).strip()
         self.resource_path = path if path.startswith("/") else f"/{path}"
         self.url = SOAP_BASE_URL.format(host=host, port=SOAP_PORT, path=self.resource_path)
-        self._session: Optional[aiohttp.ClientSession] = None
-        self._last_raw_response: Optional[str] = None
+        # HA's shared session: HA owns its lifecycle, so there is nothing to close
+        self._session = async_get_clientsession(hass)
         # One request at a time: polling, commands and the post-zap EPG check can
         # otherwise overlap, and the TV copes badly with concurrent requests.
         self._lock = asyncio.Lock()
-
-    # ------------------------- session -------------------------
-
-    async def _session_get(self) -> aiohttp.ClientSession:
-        """Return an aiohttp session, creating it if needed."""
-        if not self._session or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def async_close(self) -> None:
-        """Close the HTTP session cleanly."""
-        if self._session and not self._session.closed:
-            await self._session.close()
 
     # ------------------------- request builders ----------------
 
@@ -99,12 +90,15 @@ class LoeweSoapClient:
             "SOAPAction": soap_action,
         }
 
-        session = await self._session_get()
         try:
             _LOGGER.debug("SOAP %s → %s → envelope:\n%s", soap_action, url, envelope)
-            async with self._lock, session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
+            async with self._lock, self._session.post(
+                url,
+                data=envelope.encode("utf-8"),
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
                 text = await resp.text()
-                self._last_raw_response = text
                 await asyncio.sleep(0.1)  # small pacing delay for stability
 
                 if resp.status == 200:
@@ -165,12 +159,15 @@ class LoeweSoapClient:
             "SOAPAction": "RequestAccess",
         }
 
-        session = await self._session_get()
         try:
             _LOGGER.debug("SOAP RequestAccess envelope:\n%s", envelope)
-            async with self._lock, session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=8.0) as resp:
+            async with self._lock, self._session.post(
+                url,
+                data=envelope.encode("utf-8"),
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=8.0),
+            ) as resp:
                 text = await resp.text()
-                self._last_raw_response = text
                 await asyncio.sleep(0.1)
                 _LOGGER.debug("SOAP RequestAccess response:\n%s", text)
 

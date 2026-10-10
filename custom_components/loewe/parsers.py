@@ -3,7 +3,6 @@
 from __future__ import annotations
 from typing import Any, Optional
 from homeassistant.components.media_player.const import MediaPlayerState
-from homeassistant.const import STATE_UNKNOWN
 
 import logging
 import xml.etree.ElementTree as ET

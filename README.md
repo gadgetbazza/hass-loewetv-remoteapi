@@ -17,6 +17,29 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 ### Remote
 - Exposes a full `remote` entity
 - Supports RC key injection (numeric codes or symbolic names)
+- On/off follows the TV; `remote.turn_on` / `turn_off` wake the TV and put it into standby
+- `num_repeats` and `delay_secs` are supported; `hold_secs` is not (the TV treats a held key as a single press)
+
+Key names for `remote.send_command` (case-insensitive), or any numeric l2700 key code:
+
+| Group | Keys |
+|---|---|
+| Power | `power` (toggle), `power_on`, `power_off` |
+| Navigation | `up`, `down`, `left`, `right`, `ok`, `menu`, `back`, `end` (exit), `media` (home), `info` |
+| Volume / channels | `vol_up`, `vol_down`, `mute`, `prog_up`, `prog_down`, `0`–`9` |
+| Colour keys | `red`, `green`, `yellow`, `blue` |
+| TV features | `epg`, `epg_star`, `ttx`, `recordings` (DR+ archive), `timer`, `tv_mode`, `radio_mode`, `radio`, `pip`, `pip_hash`, `pic`, `sound`, `aspect` |
+| Inputs | `hdmi1`–`hdmi4`, `av1`–`av3`, `avs`, `vga`, `comp`, `video`, `spdif_in` |
+
+Aliases: `volume_up`/`volume_down`, `channel_up`/`channel_down`, `guide` (epg), `select`/`enter` (ok), `home` (media), `exit` (end), `text`/`teletext` (ttx), `on_off` (power), `dr_archive` (recordings).
+
+```yaml
+action: remote.send_command
+target:
+  entity_id: remote.lounge_tv
+data:
+  command: [channel_up, info]
+```
 
 ### Buttons
 - Optional button entities (disabled by default) for:
