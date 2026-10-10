@@ -24,6 +24,9 @@ class LoeweSoapClient:
         self.url = SOAP_BASE_URL.format(host=host, port=SOAP_PORT, path=self.resource_path)
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_raw_response: Optional[str] = None
+        # One request at a time: polling, commands and the post-zap EPG check can
+        # otherwise overlap, and the TV copes badly with concurrent requests.
+        self._lock = asyncio.Lock()
 
     # ------------------------- session -------------------------
 
@@ -99,7 +102,7 @@ class LoeweSoapClient:
         session = await self._session_get()
         try:
             _LOGGER.debug("SOAP %s → %s → envelope:\n%s", soap_action, url, envelope)
-            async with session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
+            async with self._lock, session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=timeout) as resp:
                 text = await resp.text()
                 self._last_raw_response = text
                 await asyncio.sleep(0.1)  # small pacing delay for stability
@@ -165,7 +168,7 @@ class LoeweSoapClient:
         session = await self._session_get()
         try:
             _LOGGER.debug("SOAP RequestAccess envelope:\n%s", envelope)
-            async with session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=8.0) as resp:
+            async with self._lock, session.post(url, data=envelope.encode("utf-8"), headers=headers, timeout=8.0) as resp:
                 text = await resp.text()
                 self._last_raw_response = text
                 await asyncio.sleep(0.1)

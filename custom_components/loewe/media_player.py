@@ -236,13 +236,20 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
             raise HomeAssistantError(f"Loewe TV did not switch to {media_id}")
 
     # ---------- Commands ----------
+    def _set_optimistic(self, **device_changes: Any) -> None:
+        """Publish an optimistic device state (power/volume/mute) to all entities.
+
+        Uses a copy of the coordinator data; the next poll replaces it with the TV's state.
+        """
+        data = self.coordinator.data or {}
+        device = {**(data.get("device") or {}), **device_changes}
+        self.coordinator.async_set_updated_data({**data, "device": device})
+
     async def async_turn_off(self) -> None:
         """Send discrete Power Off RC key."""
         if (keycode := LOEWE_RC_CODES.get("power_off")) is not None:
             if await self.coordinator.async_inject_rc_key(keycode):
-                # Optimistically update state
-                self.coordinator.data.get("device", {})["ha_state"] = "off"
-                self.async_write_ha_state()
+                self._set_optimistic(ha_state=MediaPlayerState.OFF)
 
     async def async_turn_on(self) -> None:
         """Turn on the Loewe TV using Wake-on-LAN and a discrete RC key (22)."""
@@ -277,15 +284,11 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     async def async_set_volume_level(self, volume: float) -> None:
         raw_value = int(volume * 1_000_000)
         if await self.coordinator.async_set_volume(raw_value):
-            # Optimistically update
-            self.coordinator.data.get("device", {})["volume"] = raw_value
-            self.async_write_ha_state()
+            self._set_optimistic(volume=raw_value)
 
     async def async_mute_volume(self, mute: bool) -> None:
         if await self.coordinator.async_set_mute(mute):
-            # Optimistically update
-            self.coordinator.data.get("device", {})["mute"] = mute
-            self.async_write_ha_state()
+            self._set_optimistic(mute=mute)
 
     async def async_select_source(self, source: str) -> None:
         """Switch TV input or AV source."""
