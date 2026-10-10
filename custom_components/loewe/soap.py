@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import Any, Optional
 from . import parsers
-from .const import SOAP_BASE_URL, SOAP_SERVICE, SOAP_PREFIX
+from .const import DEFAULT_RESOURCE_PATH, SOAP_BASE_URL, SOAP_PORT, SOAP_SERVICE, SOAP_PREFIX
 from .network import async_get_device_mac
 
 import asyncio
@@ -19,7 +19,9 @@ class LoeweSoapClient:
     def __init__(self, hass: HomeAssistant, host: str, resource_path: str) -> None:
         self.hass = hass
         self.host = host
-        self.resource_path = resource_path or "/loewe_tablet_0001"
+        path = (resource_path or DEFAULT_RESOURCE_PATH).strip()
+        self.resource_path = path if path.startswith("/") else f"/{path}"
+        self.url = SOAP_BASE_URL.format(host=host, port=SOAP_PORT, path=self.resource_path)
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_raw_response: Optional[str] = None
 
@@ -84,7 +86,7 @@ class LoeweSoapClient:
         raw_envelope: bool = False,
     ) -> Optional[str]:
         """Perform a raw SOAP HTTP request and return the raw response XML."""
-        url = SOAP_BASE_URL.format(host=self.host)
+        url = self.url
         envelope = inner_xml if raw_envelope else self._build_envelope(inner_xml)
 
         headers = {
@@ -111,7 +113,8 @@ class LoeweSoapClient:
                 _LOGGER.error("SOAP %s failed (%s): %s", soap_action, resp.status, text)
 
         except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            _LOGGER.warning("SOAP %s network error: %s", soap_action, err)
+            # Expected whenever the TV is in deep sleep; the coordinator logs reachability changes
+            _LOGGER.debug("SOAP %s network error: %r", soap_action, err)
         except Exception as err:
             _LOGGER.exception("SOAP %s unexpected error: %s", soap_action, err)
 
@@ -152,7 +155,7 @@ class LoeweSoapClient:
   </SOAP-ENV:Body>
 </SOAP-ENV:Envelope>"""
 
-        url = SOAP_BASE_URL.format(host=self.host)
+        url = self.url
         headers = {
             "Accept": "*/*",
             "Content-Type": "text/xml; charset=utf-8",  # Loewe-specific requirement
@@ -176,7 +179,9 @@ class LoeweSoapClient:
                 _LOGGER.debug("RequestAccess parsed result: %s", result)
                 return result
 
-        except Exception as e:
-            _LOGGER.error("RequestAccess network error: %s", e)
+        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+            _LOGGER.debug("RequestAccess network error: %r", err)
+        except Exception as err:
+            _LOGGER.exception("RequestAccess unexpected error: %s", err)
 
         return None

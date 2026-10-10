@@ -23,6 +23,8 @@ from .const import (
     DEFAULT_RESOURCE_PATH,
 )
 from .coordinator import LoeweTVCoordinator
+from .network import async_get_device_mac
+from .parsers import device_mac
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         coordinator = LoeweTVCoordinator(self.hass, host=host, resource_path=resource_path)
 
         result: dict[str, Any] | None = None
+        device_info: dict[str, Any] = {}
         try:
             for attempt in range(1, 7):
                 _LOGGER.debug("RequestAccess attempt %s/6 (host=%s)", attempt, host)
@@ -69,6 +72,10 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         break
 
                 await asyncio.sleep(1)
+
+            # Read device data over the session we just paired (needed for the TV MAC)
+            if coordinator.client_id and coordinator.fcid:
+                device_info = await coordinator.async_get_device_data()
 
         except Exception as err:
             _LOGGER.error("RequestAccess failed: %s", err)
@@ -90,42 +97,28 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # ----------------------------
         # Build the initial config data
         # ----------------------------
+        # Use the coordinator's IDs: GetDeviceData may have re-paired the session
         data = {
             CONF_HOST: host,
             CONF_RESOURCE_PATH: resource_path,
-            CONF_CLIENT_ID: result.get("ClientId"),
-            CONF_FCID: result.get("fcid"),
+            CONF_CLIENT_ID: coordinator.client_id or result.get("ClientId"),
+            CONF_FCID: coordinator.fcid or result.get("fcid"),
         }
 
         # ----------------------------
-        # Capture the TV's MAC address
+        # Capture the TV's MAC address (used for Wake-on-LAN)
         # ----------------------------
-        try:
-            # Reconnect temporarily to ensure GetDeviceData works after pairing
-            temp_coordinator = LoeweTVCoordinator(self.hass, host=host, resource_path=resource_path)
-            device_info = await temp_coordinator.async_get_device_data()
-            await temp_coordinator.async_close()
-
-            mac = device_info.get("MAC-Address")
-            if mac:
-                data[CONF_TV_MAC] = mac.strip()
-                _LOGGER.debug("Captured TV MAC during config flow: %s", data[CONF_TV_MAC])
-        except Exception as e:
-            _LOGGER.warning("Could not parse TV MAC from GetDeviceData: %s", e)
+        if tv_mac := device_mac(device_info):
+            data[CONF_TV_MAC] = tv_mac
+            _LOGGER.debug("Captured TV MAC during config flow: %s", tv_mac)
+        else:
+            _LOGGER.warning("Could not read TV MAC from GetDeviceData; it will be filled in on a later poll")
 
         # ----------------------------
-        # Capture the HA client's MAC address
+        # Capture the HA client's MAC address (sent as DeviceUUID when pairing)
         # ----------------------------
-        try:
-            from .network import _read_iface_mac, _get_default_route_iface
-
-            iface = _get_default_route_iface()
-            client_mac = _read_iface_mac(iface) if iface else None
-            if client_mac:
-                data[CONF_CLIENT_MAC] = client_mac
-                _LOGGER.debug("Captured HA Client MAC during config flow: %s", data[CONF_CLIENT_MAC])
-        except Exception as e:
-            _LOGGER.debug("Could not determine HA Client MAC: %s", e)
+        data[CONF_CLIENT_MAC] = await async_get_device_mac(self.hass)
+        _LOGGER.debug("Captured HA Client MAC during config flow: %s", data[CONF_CLIENT_MAC])
 
         # ----------------------------
         # Final logging and entry creation

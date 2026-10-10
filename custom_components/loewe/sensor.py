@@ -40,6 +40,5 @@ class CurrentServiceSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        """Return the current service name."""
-        status = self.coordinator.data.get("status") if self.coordinator.data else {}
-        return status.get("ServiceName") or status.get("CurrentService")
+        """Return the current service name (AV input name or "TV")."""
+        return self.coordinator.current_source_name

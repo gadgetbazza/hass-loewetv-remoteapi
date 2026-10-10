@@ -94,17 +94,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity, MediaPlayerEntity):
     @property
     def source(self) -> str | None:
         """Return the currently active input."""
-        loc = self.coordinator.current_locator
-        if not loc:
-            return None
-
-        for src in self.coordinator.available_sources:
-            if src["locator"] == loc:
-                return src["name"]
-
-        if loc == getattr(self.coordinator, "_last_tv_locator", None):
-            return "TV"
-        return None
+        return self.coordinator.current_source_name
 
     # ---------- Commands ----------
     async def async_turn_off(self) -> None:

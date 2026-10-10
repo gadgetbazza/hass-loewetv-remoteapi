@@ -5,9 +5,16 @@ from datetime import timedelta
 from typing import Any, Optional
 from .soap import LoeweSoapClient
 from . import parsers
-from .const import SOAP_PREFIX, DEFAULT_POLL_INTERVAL, CONF_TV_MAC, CONF_CLIENT_MAC
+from .const import (
+    SOAP_PREFIX,
+    DEFAULT_POLL_INTERVAL,
+    CONF_TV_MAC,
+    CONF_CLIENT_MAC,
+    CONF_CLIENT_ID,
+    CONF_FCID,
+)
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.components.media_player import MediaPlayerState
 
 import logging
@@ -38,6 +45,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.tv_mac: Optional[str] = None
         self.device_name: Optional[str] = None
         self._last_raw_response: Optional[str] = None
+        self._reachable = True
 
         # Session IDs
         self.client_mac: Optional[str] = None
@@ -79,41 +87,27 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.client_mac,
         )
 
-        # --- Step 1: status first (determines power/session validity)
-        try:
-            status_resp = await self._safe_request("GetCurrentStatus")
-        except Exception as e:
-            _LOGGER.debug("GetCurrentStatus request failed (network/timeout): %s", e)
-            # TV likely in deep sleep or network unreachable -> assume OFF and bail out
+        # --- Step 1: status first (determines power/session validity).
+        # _safe_request repairs the session itself if the reply comes back empty.
+        status_resp = await self._safe_request("GetCurrentStatus")
+        if status_resp is None:
+            # TV in deep sleep or network unreachable -> report OFF
+            if self._reachable:
+                _LOGGER.info("Loewe TV at %s is not responding; treating it as off", self.soap.host)
+                self._reachable = False
             return {
                 "status": {"ha_state": MediaPlayerState.OFF},
                 "playback": {},
                 "device": {"ha_state": MediaPlayerState.OFF, "volume": None, "mute": None},
             }
 
-        if not status_resp:
-            _LOGGER.debug("No response from TV — assuming powered off / deep sleep")
-            return {
-                "status": {"ha_state": MediaPlayerState.OFF},
-                "playback": {},
-                "device": {"ha_state": MediaPlayerState.OFF, "volume": None, "mute": None},
-            }
+        if not self._reachable:
+            _LOGGER.info("Loewe TV at %s is responding again", self.soap.host)
+            self._reachable = True
 
         status = parsers.parse_status(status_resp)
-
-        # If empty status → attempt repair once, then bail out this cycle
         if not status:
-            _LOGGER.debug("Empty GetCurrentStatus response — attempting session repair")
-            repaired = await self._repair_session()
-            if not repaired:
-                _LOGGER.debug("Session repair failed — skipping remaining polling cycle")
-                return {}
-            _LOGGER.debug("Session repaired — continue remaining polling cycle until next run")
-            status_resp = await self._safe_request("GetCurrentStatus")
-            status = parsers.parse_status(status_resp)
-            if not status:
-                _LOGGER.debug("Status still empty after successful repair — skipping cycle")
-                return {}
+            raise UpdateFailed("Loewe TV returned an empty status, even after re-pairing")
 
         # After status is valid, ensure we have sources
         if not self.available_sources:
@@ -124,12 +118,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # --- Step 2: remaining calls only if status was valid
         playback_resp = await self._safe_request("GetCurrentPlayback")
-        device_resp = await self._safe_request("GetDeviceData")
+        device = await self.async_get_device_data()
         volume_resp = await self._safe_request("GetVolume")
         mute_resp = await self._safe_request("GetMute")
 
         playback = parsers.parse_playback(playback_resp)
-        device = parsers.parse_device_data(device_resp)
         volume = parsers.parse_volume(volume_resp)
         mute = parsers.parse_mute(mute_resp)
 
@@ -142,12 +135,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._last_tv_locator = locator
 
         # --- Step 3: update cached state
-        self.current_locator = status.get("CurrentLocator") or self.current_locator
+        # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
+        self.current_locator = playback.get("Locator") or self.current_locator
         self._device_info = device or self._device_info
         self.device_name = device.get("NetworkHostName") or self.device_name
 
-        tvmac = device.get("MAC-Address-LAN") or device.get("MAC-Address")
-        if tvmac:
+        if tvmac := parsers.device_mac(device):
             self.tv_mac = tvmac
 
         data = {
@@ -172,6 +165,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.client_id = result.get("ClientId")
             self.fcid = result.get("fcid")
             _LOGGER.debug("Session established: ClientId=%s, FCID=%s", self.client_id, self.fcid)
+            self._persist_session()
         else:
             _LOGGER.warning("RequestAccess failed or rejected: %s", result)
         return result
@@ -191,32 +185,65 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.debug("Session repair %s", "successful" if ok else f"failed: {result}")
         return ok
 
-    async def _safe_request(self, action: str, *, extra_xml: str = "") -> Optional[str]:
-        """Perform a SOAP call with session repair logic."""
-        _LOGGER.debug(
-            "SOAP safe_request(%s): using ClientId=%s, FCID=%s",
-            action, self.client_id, self.fcid
+    def _persist_session(self) -> None:
+        """Store a renewed ClientId/fcid so it survives a restart."""
+        if not self._entry:
+            return
+        if (
+            self._entry.data.get(CONF_CLIENT_ID) == self.client_id
+            and self._entry.data.get(CONF_FCID) == self.fcid
+        ):
+            return
+        self.hass.config_entries.async_update_entry(
+            self._entry,
+            data={**self._entry.data, CONF_CLIENT_ID: self.client_id, CONF_FCID: self.fcid},
         )
 
+    async def _send(self, action: str, extra_xml: str) -> Optional[str]:
+        """Send one SOAP action using the current session IDs."""
+        _LOGGER.debug(
+            "SOAP request(%s): using ClientId=%s, FCID=%s",
+            action, self.client_id, self.fcid
+        )
         body = self.soap.build_body(
             action,
             fcid=self.fcid,
             client_id=self.client_id,
             extra_xml=extra_xml,
         )
+        return await self.soap.request(action, body)
 
-        resp = await self.soap.request(action, body)
-        if not resp or f"<{action}Response" in resp and f">{action}Response>" in resp:
-            _LOGGER.debug("SOAP %s returned empty response — attempting repair", action)
+    async def _safe_request(self, action: str, *, extra_xml: str = "") -> Optional[str]:
+        """Perform a SOAP call, re-pairing once if a Get* call returns an empty reply.
+
+        The TV answers Get* calls made with an expired ClientId with an empty
+        <XXXResponse>. Commands are not retried because some of them (e.g.
+        ZapToMedia) legitimately reply with an empty body. Network failures
+        (None) are not retried either: the TV is simply off or unreachable.
+        """
+        resp = await self._send(action, extra_xml)
+        if action.startswith("Get") and parsers.is_empty_response(resp):
+            _LOGGER.debug("SOAP %s returned an empty response; attempting session repair", action)
             if await self._repair_session():
-                body = self.soap.build_body(
-                    action,
-                    fcid=self.fcid,
-                    client_id=self.client_id,
-                    extra_xml=extra_xml,
-                )
-                resp = await self.soap.request(action, body)
+                resp = await self._send(action, extra_xml)
         return resp
+
+    async def async_get_device_data(self) -> dict[str, Any]:
+        """Return parsed GetDeviceData (chassis, software version, MACs, host name)."""
+        return parsers.parse_device_data(await self._safe_request("GetDeviceData"))
+
+    @property
+    def current_source_name(self) -> Optional[str]:
+        """Name of the active input: an AV source name, "TV", or None if unknown."""
+        loc = self.current_locator
+        if not loc:
+            return None
+        for src in self.available_sources:
+            if src["locator"] == loc:
+                return src["name"]
+        if loc == self._last_tv_locator:
+            return "TV"
+        return None
 
     # ---------------------- Volume / Mute / Remote ----------------------
 

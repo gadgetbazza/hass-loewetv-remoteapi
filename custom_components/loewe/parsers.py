@@ -35,6 +35,30 @@ def _extract_response_body(xml: Optional[str]) -> Optional[ET.Element]:
         return None
 
 
+def is_empty_response(xml: Optional[str]) -> bool:
+    """Return True for a well-formed SOAP reply whose <XXXResponse> has no content.
+
+    This is how the TV answers requests made with an expired/unknown ClientId.
+    Network failures (None) and unparsable XML are not treated as empty.
+    """
+    if not xml:
+        return False
+    try:
+        body = ET.fromstring(xml).find(f".//{{{SOAP_NS}}}Body")
+    except ET.ParseError:
+        return False
+    if body is None or len(body) == 0:
+        return False
+    resp = body[0]
+    return len(resp) == 0 and not (resp.text or "").strip()
+
+
+def device_mac(device: dict[str, Any]) -> Optional[str]:
+    """Return the TV's MAC address from parsed GetDeviceData, if present."""
+    mac = device.get("MAC-Address-LAN") or device.get("MAC-Address")
+    return mac.strip() if mac else None
+
+
 # ---------------------- Individual Parsers ----------------------
 
 def parse_request_access(xml: Optional[str]) -> dict[str, Any]:
@@ -65,11 +89,11 @@ def parse_status(xml: Optional[str]) -> dict[str, Any]:
         result[tag] = child.text
 
     # --- Derive Home Assistant media player state
+    # The TV reports standby as Power=idle. Map it to OFF, not IDLE: HA's power
+    # toggle treats every state except OFF as on, so IDLE would send power-off again.
     power = (result.get("Power") or "").lower()
     if power in ("tv", "on"):
         result["ha_state"] = MediaPlayerState.ON
-    elif power in ("standby", "off", "idle"):
-        result["ha_state"] = MediaPlayerState.IDLE
     else:
         result["ha_state"] = MediaPlayerState.OFF
 

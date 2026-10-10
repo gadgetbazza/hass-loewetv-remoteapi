@@ -71,7 +71,8 @@ PLATFORMS: list[Platform] = [
 ]
 
 # SOAP core constants
-SOAP_BASE_URL = "http://{host}:905/loewe_tablet_0001"
+SOAP_PORT = 905
+SOAP_BASE_URL = "http://{host}:{port}{path}"
 SOAP_SERVICE = "urn:loewe.de:RemoteTV:Tablet"
 SOAP_PREFIX = "ltv"
 

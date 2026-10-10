@@ -1,28 +1,9 @@
-debug_status:
-  name: Debug Status
-  description: >
-    Log raw GetCurrentStatus, GetVolume, and GetMute responses for one or all
-    Loewe TVs. Optionally renew the ClientId first.
-  fields:
-    entry_id:
-      name: Config Entry ID
-      description: Target a specific Loewe TV by config entry_id. If omitted, runs on all.
-      required: false
-      selector:
-        text:
-    force_renew:
-      name: Force Renew ClientId
-      description: Drop current ClientId and request a new one before testing.
-      required: false
-      default: false
-      selector:
-        boolean:
-
 refresh_sources:
   name: Refresh Sources
-  description: Re-fetch the list of available AV inputs and TV channels from the Loewe TV.
+  description: Re-read the list of AV inputs (the Source dropdown) from the Loewe TV, e.g. after renaming an input on the TV.
   target:
     entity:
+      integration: loewe
       domain: media_player
 
 channel_up:
@@ -30,6 +11,7 @@ channel_up:
   description: Step up to the next available TV channel.
   target:
     entity:
+      integration: loewe
       domain: media_player
 
 channel_down:
@@ -37,5 +19,6 @@ channel_down:
   description: Step down to the previous available TV channel.
   target:
     entity:
+      integration: loewe
       domain: media_player
 
