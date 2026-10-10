@@ -241,11 +241,12 @@ def parse_channel_list(xml: Optional[str]) -> list[dict[str, str]]:
 
 def parse_event(xml: Optional[str]) -> dict[str, Any]:
     """
-    Parse GetCurrentEvent / GetNextEvent into {"name", "info", "start", "duration"}.
+    Parse GetCurrentEvent / GetNextEvent into {"name", "info", "start", "duration", "locator"}.
 
     The TV answers with either <LiveEvent><Name> or (per the spec)
     <MediaEvent><MediaInformation><ShortInfo>; both are handled. "start" is a
-    Unix timestamp and "duration" is in seconds. Returns {} if there is no event.
+    Unix timestamp and "duration" is in seconds. "locator" is the channel the
+    event belongs to (None if not given). Returns {} if there is no event.
     """
     resp = _extract_response_body(xml)
     if resp is None:
@@ -259,11 +260,15 @@ def parse_event(xml: Optional[str]) -> dict[str, Any]:
         return {}
 
     info_el = _find(resp, "ExtendedInfo")
+    locator_el = _find(resp, "Locator")
+    if locator_el is None:
+        locator_el = _find(resp, "ItemLocator")
     event: dict[str, Any] = {
         "name": name,
         "info": (info_el.text or "").strip() if info_el is not None else "",
         "start": None,
         "duration": None,
+        "locator": (locator_el.text or "").strip() or None if locator_el is not None else None,
     }
     sched = _find(resp, "ScheduledTime")
     if sched is not None:

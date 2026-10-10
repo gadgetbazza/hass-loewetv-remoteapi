@@ -486,6 +486,16 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.next_event = parsers.parse_event(
             await self._safe_request("GetNextEvent", extra_xml=player)
         )
+        # Straight after a channel change the TV can still answer with the
+        # previous channel's programme; treat that as "no EPG yet" so it is retried.
+        tuned = self._channel_key(self.current_locator or "")
+        for event in (self.current_event, self.next_event):
+            if event.get("locator") and self._channel_key(event["locator"]) != tuned:
+                _LOGGER.debug(
+                    "EPG answered for %s, not the tuned channel; retrying", event["locator"]
+                )
+                self.current_event, self.next_event = {}, {}
+                break
         self._event_locator = self.current_locator
 
         start = self.current_event.get("start")
