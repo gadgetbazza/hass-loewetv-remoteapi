@@ -27,24 +27,15 @@ class LoeweTVRemote(CoordinatorEntity, RemoteEntity):
     """Representation of Loewe TV Remote for sending RC keys."""
 
     _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_name = None  # like other HA TV remotes, the entity takes the device's name
 
     def __init__(self, coordinator: LoeweTVCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
         self.coordinator = coordinator
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_remote"
-
-        device_info = coordinator._device_info or {}
-        base_name = device_info.get("NetworkHostName") or entry.title or "Loewe TV"
-        self._attr_name = f"{base_name} Remote"
-
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "manufacturer": "Loewe",
-            "model": device_info.get("Chassis", "TV"),
-            "sw_version": device_info.get("SW-Version", ""),
-            "name": base_name,
-        }
+        self._attr_device_info = coordinator.device_info
 
     async def async_send_command(
         self,

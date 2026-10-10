@@ -72,20 +72,7 @@ class LoeweTVButton(ButtonEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return Loewe device info so buttons group under the TV device."""
-        device_info = self._coordinator._device_info or {}
-        base_name = (
-            device_info.get("NetworkHostName")
-            or getattr(self._coordinator, "device_name", None)
-            or "Loewe TV"
-        )
-
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry_id)},
-            name=base_name,
-            manufacturer="Loewe",
-            model=device_info.get("Chassis", "Unknown"),
-            sw_version=device_info.get("SW-Version", ""),
-        )
+        return self._coordinator.device_info
 
     async def async_press(self) -> None:
         """Send the RC key associated with this button."""

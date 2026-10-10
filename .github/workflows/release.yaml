@@ -3,7 +3,8 @@ name: Auto HACS Release
 on:
   push:
     tags:
-      - 'v*.*.*'  # triggers only for version tags like v1.0.0
+      - 'v*.*.*'  # version tags like v1.0.0 ...
+      - '[0-9]*.[0-9]*.[0-9]*'  # ... or 1.0.0
 
 permissions:
   contents: write
@@ -17,35 +18,21 @@ jobs:
         with:
           fetch-depth: 0  # required to generate changelog
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: Extract version from tag
         id: get_version
         run: |
-          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "VERSION=${TAG#v}" >> $GITHUB_ENV
 
-      - name: Update manifest.json version
+      # HACS installs the tagged code, so the manifest must already carry the
+      # version at the tagged commit. Bump manifest.json before tagging.
+      - name: Check manifest.json version matches tag
         run: |
-          python - <<EOF
-          import json
-          f = 'custom_components/loewe/manifest.json'
-          data = json.load(open(f))
-          data['version'] = "${{ env.VERSION }}"
-          with open(f, 'w') as out:
-              json.dump(data, out, indent=2)
-              out.write('\n')
-          EOF
-
-      - name: Commit manifest.json version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add custom_components/loewe/manifest.json
-          git commit -m "Update manifest version to ${{ env.VERSION }}" || echo "No changes to commit"
-          git push origin HEAD:main
+          MANIFEST_VERSION=$(jq -r .version custom_components/loewe/manifest.json)
+          if [ "$MANIFEST_VERSION" != "$VERSION" ]; then
+            echo "::error::manifest.json version ($MANIFEST_VERSION) does not match tag ($VERSION). Bump the manifest, commit, then tag."
+            exit 1
+          fi
 
       - name: Generate changelog from commits
         id: changelog

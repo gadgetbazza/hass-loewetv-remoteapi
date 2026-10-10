@@ -10,7 +10,9 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Power on/off (WOL + RC key)
 - Volume control (fine step, absolute volume, mute toggle)
 - Source selection (HDMI, AV, tuner etc)
-- Channel up / down
+- Now playing: channel name, programme title, duration/progress and next programme (from the TV's EPG)
+- State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
+- Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
 
 ### Remote
 - Exposes a full `remote` entity
@@ -18,12 +20,29 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 
 ### Buttons
 - Optional button entities (disabled by default) for:
-  - Volume Up / Down, Mute
-  - Menu, Back, Info, Home
+  - Volume Up / Down, Mute, Channel Up / Down
+  - Menu, Back, Info, Home, arrow keys
   - Red / Green / Yellow / Blue keys
 
 ### Sensors
-- Current Service (channel or source)
+- **Current Service**: the channel name, or the input name (e.g. HDMI 1)
+- **Current Programme**: the programme on the current channel, with start/end times, description and next programme as attributes
+
+### Services
+- `loewe.refresh_sources`: re-read the AV inputs and channel lists from the TV (e.g. after a channel scan or renaming an input). Channels and inputs are otherwise loaded once at startup.
+- `loewe.channel_up` / `loewe.channel_down`: step through the TV's channels.
+
+### Switching channels from automations
+`media_player.play_media` accepts a channel name, a favourites number or a channel locator:
+
+```yaml
+action: media_player.play_media
+target:
+  entity_id: media_player.lounge_tv
+data:
+  media_content_type: channel
+  media_content_id: "BBC TWO"   # or "2" for favourite number 2
+```
 
 ### Diagnostics
 - Device info (Chassis, SW version, MACs)
@@ -76,6 +95,8 @@ logger:
 
 ## Notes
 - The TV may need to `RequestAccess` again after certain power cycles, the integration automatically retries this in the background.  
+- Programme information comes from the TV's own EPG. Right after a channel change the TV can take a moment to provide it: changes made from Home Assistant show the programme within a couple of seconds, changes made with the TV's remote on the next poll (up to 10 seconds).
+- Channel logos are not shown: the TVs tested report logo URLs but do not serve them.
 
 ---
 
