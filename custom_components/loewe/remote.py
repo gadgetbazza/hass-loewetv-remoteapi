@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import LOEWE_RC_CODES
+from .const import rc_code
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,7 +56,7 @@ class LoeweTVRemote(CoordinatorEntity[LoeweTVCoordinator], RemoteEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_send_command(self, command: Iterable[str], **kwargs: Any) -> None:
-        """Send RC keys by name (see LOEWE_RC_CODES) or numeric code.
+        """Send RC keys by name or alias (see LOEWE_RC_CODES / LOEWE_RC_ALIASES) or numeric code.
 
         Honours num_repeats and delay_secs (between key presses). hold_secs is
         ignored: the TV treats a held key as a single press.
@@ -66,12 +66,9 @@ class LoeweTVRemote(CoordinatorEntity[LoeweTVCoordinator], RemoteEntity):
 
         keys: list[tuple[str, int]] = []
         for cmd in [command] if isinstance(command, str) else command:
-            if (key := LOEWE_RC_CODES.get(cmd.lower())) is None:
-                try:
-                    key = int(cmd)
-                except ValueError:
-                    _LOGGER.warning("Invalid RC key: %s", cmd)
-                    continue
+            if (key := rc_code(cmd)) is None:
+                _LOGGER.warning("Invalid RC key: %s", cmd)
+                continue
             keys.append((cmd, key))
 
         # Each key is repeated num_repeats times before the next key (unchanged behaviour)

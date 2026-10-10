@@ -48,9 +48,14 @@ LOEWE_RC_CODES: dict[str, int] = {
     "end": 63,        # Back
     "sound": 64,
     "back": 65,
+    "tv_mode": 72,     # TV_MODE_ON
+    "radio_mode": 73,  # RADIO_MODE_ON
+    "epg_star": 78,
     "info": 79,
+    "pip_hash": 88,
     "aspect": 90,
     "timer": 91,
+    "recordings": 92,  # DR_ARCHIVE
     "av1": 114,
     "av2": 115,
     "av3": 116,
@@ -64,6 +69,33 @@ LOEWE_RC_CODES: dict[str, int] = {
     "video": 124,
     "spdif_in": 125,
 }
+
+# Friendlier names accepted by remote.send_command (digits 0-9 are sent as-is)
+LOEWE_RC_ALIASES: dict[str, str] = {
+    "on_off": "power",
+    "volume_up": "vol_up",
+    "volume_down": "vol_down",
+    "channel_up": "prog_up",
+    "channel_down": "prog_down",
+    "guide": "epg",
+    "select": "ok",
+    "enter": "ok",
+    "home": "media",
+    "exit": "end",
+    "text": "ttx",
+    "teletext": "ttx",
+    "dr_archive": "recordings",
+}
+
+
+def rc_code(name: str) -> int | None:
+    """Return the l2700 key code for a key name, alias or numeric string, else None."""
+    key = name.strip().lower()
+    key = LOEWE_RC_ALIASES.get(key, key)
+    if key in LOEWE_RC_CODES:
+        return LOEWE_RC_CODES[key]
+    return int(key) if key.isdigit() else None
+
 
 # Platforms supported by this integration
 PLATFORMS: list[Platform] = [
