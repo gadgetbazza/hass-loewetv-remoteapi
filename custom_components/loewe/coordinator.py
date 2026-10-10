@@ -3,22 +3,28 @@
 from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Optional
+from xml.sax.saxutils import escape
 from .soap import LoeweSoapClient
 from . import parsers
 from .const import (
+    DOMAIN,
     SOAP_PREFIX,
     DEFAULT_POLL_INTERVAL,
+    CHANNEL_PAGE_SIZE,
+    MAX_CHANNELS,
     CONF_TV_MAC,
     CONF_CLIENT_MAC,
     CONF_CLIENT_ID,
     CONF_FCID,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.components.media_player import MediaPlayerState
 
 import logging
 import asyncio
+import time
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,6 +52,19 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_name: Optional[str] = None
         self._last_raw_response: Optional[str] = None
         self._reachable = True
+
+        # Channel lists (loaded with the AV sources) and the now-playing cache
+        self.favourite_channels: list[dict[str, str]] = []
+        self.all_channels: list[dict[str, str]] = []
+        self._channels_by_uuid: dict[str, dict[str, str]] = {}
+        self._channels_by_key: dict[str, dict[str, str]] = {}
+        self._sources_loaded = False
+        self.current_channel: Optional[dict[str, str]] = None
+        self.current_event: dict[str, Any] = {}
+        self.next_event: dict[str, Any] = {}
+        self._event_locator: Optional[str] = None
+        self._event_expires = 0.0
+        self._channel_changed_at = 0.0
 
         # Session IDs
         self.client_mac: Optional[str] = None
@@ -95,6 +114,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._reachable:
                 _LOGGER.info("Loewe TV at %s is not responding; treating it as off", self.soap.host)
                 self._reachable = False
+            self._clear_now_playing()
             return {
                 "status": {"ha_state": MediaPlayerState.OFF},
                 "playback": {},
@@ -109,8 +129,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not status:
             raise UpdateFailed("Loewe TV returned an empty status, even after re-pairing")
 
-        # After status is valid, ensure we have sources
-        if not self.available_sources:
+        # After status is valid, ensure we have sources and channels
+        if not self._sources_loaded:
             try:
                 await self.async_refresh_sources()
             except Exception as e:
@@ -137,6 +157,15 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
         self.current_locator = playback.get("Locator") or self.current_locator
+
+        # Now playing: only while the TV is actually on (standby still answers playback)
+        if status.get("ha_state") == MediaPlayerState.ON:
+            self.current_channel = self.lookup_channel(
+                playback.get("Locator"), playback.get("MediaItemUuid")
+            )
+            await self._async_update_events()
+        else:
+            self._clear_now_playing()
         self._device_info = device or self._device_info
         self.device_name = device.get("NetworkHostName") or self.device_name
 
@@ -146,6 +175,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = {
             "status": status,
             "playback": playback,
+            "channel": self.current_channel,
+            "event": self.current_event,
+            "next_event": self.next_event,
             "device": {
                 "ha_state": status.get("ha_state", "unknown"),
                 "volume": volume,
@@ -155,6 +187,18 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._last_raw_response = self.soap._last_raw_response
         return data
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Device registry info shared by all of this TV's entities."""
+        device = self._device_info or {}
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._entry.entry_id)},
+            name=self.device_name or self._entry.title or "Loewe TV",
+            manufacturer="Loewe",
+            model=device.get("Chassis") or "TV",
+            sw_version=device.get("SW-Version") or None,
+        )
 
     # ---------------------- Session Management ----------------------
 
@@ -284,113 +328,233 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ---------------------- Sources / Channels ----------------------
 
-    async def async_get_channel_lists(self) -> list[dict[str, str]]:
+    async def async_get_channel_lists(self) -> list[dict[str, Any]]:
         """Retrieve available channel/input lists from the TV."""
         extra = """
             <ltv:QueryParameters>
-                <ltv:Range startIndex="0" maxItems="20"/>
+                <ltv:Range startIndex="0" maxItems="50"/>
             </ltv:QueryParameters>
         """
         resp = await self._safe_request("GetListOfChannelLists", extra_xml=extra)
         return parsers.parse_channel_lists(resp)
 
     async def async_get_channel_list(self, view_id: str) -> list[dict[str, str]]:
-        """Retrieve items of a channel list (e.g., AV inputs)."""
-        extra = f"""
-            <ltv:ChannelListView>{view_id}</ltv:ChannelListView>
-            <ltv:QueryParameters>
-                <ltv:Range startIndex="0" maxItems="20" />
-                <ltv:MediaItemInformation>true</ltv:MediaItemInformation>
-                <ltv:MediaItemClass></ltv:MediaItemClass>
-            </ltv:QueryParameters>
+        """Retrieve all items of a channel list (AV inputs or TV channels), page by page.
+
+        Some TVs ignore the requested range and return the whole list in one
+        reply, so duplicate items are dropped and a page adding nothing ends the loop.
         """
-        resp = await self._safe_request("GetChannelList", extra_xml=extra)
-        return parsers.parse_channel_list(resp)
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        while len(items) < MAX_CHANNELS:
+            extra = f"""
+                <ltv:ChannelListView>{escape(view_id)}</ltv:ChannelListView>
+                <ltv:QueryParameters>
+                    <ltv:Range startIndex="{len(items)}" maxItems="{CHANNEL_PAGE_SIZE}" />
+                    <ltv:MediaItemInformation>true</ltv:MediaItemInformation>
+                    <ltv:MediaItemClass></ltv:MediaItemClass>
+                </ltv:QueryParameters>
+            """
+            resp = await self._safe_request("GetChannelList", extra_xml=extra)
+            page, total = parsers.parse_channel_list_page(resp)
+            new = [item for item in page if item["locator"] not in seen]
+            seen.update(item["locator"] for item in new)
+            items.extend(new)
+            if not new or total is None or len(items) >= total:
+                break
+        return items
 
     async def async_get_first_tv_channel(self) -> Optional[str]:
-        """
-        Return the locator of the first TV channel.
-        Prefer favourites ('favlist' in view) then fastscan ('fastscan' in view).
-        """
-        channel_lists = await self.async_get_channel_lists()
-        if not channel_lists:
-            _LOGGER.debug("No channel lists found when searching for a TV channel")
-            return None
-
-        # Prefer favourites
-        favlist = next((c for c in channel_lists if "favlist" in (c["view"] or "").lower()), None)
-        if favlist:
-            items = await self.async_get_channel_list(favlist["view"])
-            if items:
-                locator = items[0]["locator"]
-                _LOGGER.debug("Using first favourite channel: %s", locator)
-                return locator
-
-        # Fall back to fastscan (full DVB list)
-        fastscan = next((c for c in channel_lists if "fastscan" in (c["view"] or "").lower()), None)
-        if fastscan:
-            items = await self.async_get_channel_list(fastscan["view"])
-            if items:
-                locator = items[0]["locator"]
-                _LOGGER.debug("Using first fastscan channel: %s", locator)
-                return locator
-
+        """Return the locator of the first TV channel (favourites first, then the full list)."""
+        if not self._sources_loaded:
+            await self.async_refresh_sources()
+        for channel in (self.favourite_channels or self.all_channels)[:1]:
+            _LOGGER.debug("Using first TV channel: %s", channel["name"])
+            return channel["locator"]
         _LOGGER.debug("No TV channels available to zap to")
         return None
 
     async def async_refresh_sources(self) -> None:
         """
-        (Re)load AV sources into self.available_sources.
-        Heuristic: find AV list by name '#3051' if present; otherwise pick any
-        list whose name or view looks like AV inputs.
+        (Re)load the AV inputs and the TV channel lists.
+
+        View names are prefixed by type (per the API spec): "avlist" for AV
+        inputs, "favlist" for favourites and "fastscan" for the full network
+        list. The first list of each type is used.
         """
         lists_ = await self.async_get_channel_lists()
         if not lists_:
-            self.available_sources = []
-            _LOGGER.debug("No channel lists available; cleared available sources")
+            _LOGGER.debug("No channel lists available; will retry on the next poll")
             return
 
-        # First try the historic '#3051' ID by name (from pre.zip behaviour)
-        avlist = next((c for c in lists_ if (c.get("name") or "") == "#3051"), None)
+        def first(prefix: str) -> Optional[dict[str, Any]]:
+            return next((c for c in lists_ if c["view"].lower().startswith(prefix)), None)
 
-        # Fallback heuristics: look for 'av' or 'input' in name/view
-        if not avlist:
-            avlist = next(
-                (c for c in lists_ if any(
-                    kw in (c.get("name","").lower()) or kw in (c.get("view","").lower())
-                    for kw in ("av", "input", "hdmi")
-                )),
-                None
-            )
+        # The AV list is historically named '#3051'; fall back to the view prefix
+        avlist = next((c for c in lists_ if c.get("name") == "#3051"), None) or first("avlist")
+        favlist = first("favlist")
+        fulllist = first("fastscan")
 
-        if not avlist:
-            self.available_sources = []
-            _LOGGER.debug("No AV list found in channel lists; cleared available sources")
+        self.available_sources = await self.async_get_channel_list(avlist["view"]) if avlist else []
+        self.favourite_channels = await self.async_get_channel_list(favlist["view"]) if favlist else []
+        self.all_channels = await self.async_get_channel_list(fulllist["view"]) if fulllist else []
+        self._index_channels()
+        self._sources_loaded = True
+        _LOGGER.info(
+            "Loaded %d AV sources, %d favourite channels, %d channels in total",
+            len(self.available_sources), len(self.favourite_channels), len(self.all_channels),
+        )
+
+    # ---------------------- Channel lookup / Now playing ----------------------
+
+    @staticmethod
+    def _channel_key(locator: str) -> str:
+        """Key identifying a channel independent of the list it was tuned from.
+
+        Locators look like "channel://<pos>:<channel id>:<list id>"; the middle
+        part identifies the channel itself.
+        """
+        parts = locator.split(":")
+        return parts[2] if len(parts) > 2 else locator
+
+    def _index_channels(self) -> None:
+        """Rebuild the channel lookup tables from the cached lists."""
+        self._channels_by_uuid = {}
+        self._channels_by_key = {}
+        # Favourites last so their entries (and numbering) win
+        for channel in [*self.all_channels, *self.favourite_channels]:
+            if channel.get("uuid"):
+                self._channels_by_uuid[channel["uuid"]] = channel
+            self._channels_by_key[self._channel_key(channel["locator"])] = channel
+
+    def _is_av_locator(self, locator: str) -> bool:
+        return any(src["locator"] == locator for src in self.available_sources)
+
+    def lookup_channel(
+        self, locator: Optional[str], uuid: Optional[str] = None
+    ) -> Optional[dict[str, str]]:
+        """Return the cached TV channel for a locator/mediaItemUuid, or None (e.g. an AV input)."""
+        if not locator or self._is_av_locator(locator):
+            return None
+        if uuid and (channel := self._channels_by_uuid.get(uuid)):
+            return channel
+        return self._channels_by_key.get(self._channel_key(locator))
+
+    def find_channel(self, query: str) -> Optional[dict[str, str]]:
+        """Find a TV channel or AV input by locator, name (case-insensitive) or favourite number."""
+        query = query.strip()
+        everything = [*self.favourite_channels, *self.all_channels, *self.available_sources]
+        for item in everything:
+            if item["locator"] == query:
+                return item
+        folded = query.casefold()
+        for item in everything:
+            if item["name"].casefold() == folded:
+                return item
+        return next((c for c in self.favourite_channels if c.get("number") == query), None)
+
+    def _clear_now_playing(self) -> None:
+        self.current_channel = None
+        self.current_event = {}
+        self.next_event = {}
+        self._event_locator = None
+        self._event_expires = 0.0
+
+    async def _async_update_events(self) -> None:
+        """Fetch current/next programme when the channel changes or the programme ends."""
+        if not self.current_channel:
+            self.current_event = {}
+            self.next_event = {}
+            self._event_locator = None
             return
 
-        items = await self.async_get_channel_list(avlist["view"])
-        self.available_sources = items or []
-        _LOGGER.info("Loaded %d available AV sources", len(self.available_sources))
+        now = time.time()
+        if self.current_locator != self._event_locator:
+            self._channel_changed_at = now
+        elif now < self._event_expires:
+            return
+
+        player = f"<{SOAP_PREFIX}:Player>0</{SOAP_PREFIX}:Player>"
+        self.current_event = parsers.parse_event(
+            await self._safe_request("GetCurrentEvent", extra_xml=player)
+        )
+        self.next_event = parsers.parse_event(
+            await self._safe_request("GetNextEvent", extra_xml=player)
+        )
+        self._event_locator = self.current_locator
+
+        start = self.current_event.get("start")
+        duration = self.current_event.get("duration")
+        end = start + duration if start is not None and duration else None
+        if end and end > now:
+            # Re-check just after the programme ends
+            self._event_expires = end + 5
+        elif now - self._channel_changed_at < 60:
+            # Right after a channel change the TV may not have the EPG yet: retry next poll
+            self._event_expires = now
+        else:
+            self._event_expires = now + 60
+        _LOGGER.debug(
+            "Now playing on %s: %s (next: %s)",
+            self.current_channel["name"],
+            self.current_event.get("name"),
+            self.next_event.get("name"),
+        )
+
+    @property
+    def current_service_name(self) -> Optional[str]:
+        """Channel name when watching TV, otherwise the AV input name."""
+        if self.current_channel:
+            return self.current_channel["name"]
+        return self.current_source_name
 
     async def async_set_channel(self, locator: str) -> bool:
         """Switch the TV to a given locator via ZapToMedia."""
         extra = f"""
             <ltv:Player>0</ltv:Player>
-            <ltv:Locator>{locator}</ltv:Locator>
+            <ltv:Locator>{escape(locator)}</ltv:Locator>
         """
         resp = await self._safe_request("ZapToMedia", extra_xml=extra)
 
         ok = bool(resp)  # ZapToMedia gives an empty but syntactically valid response on success
         if ok:
-            # Optimistic update
+            # Optimistic update; the next poll fetches the programme for the new channel
             self.current_locator = locator
-            lower = locator.lower()
-            if lower.startswith(("dvb://", "tv://")):
+            self.current_channel = self.lookup_channel(locator)
+            if self.current_channel:
                 self._last_tv_locator = locator  # remember last TV channel
+            self._event_locator = None
+            await self.async_request_refresh()
+            if self._entry:
+                self._entry.async_create_background_task(
+                    self.hass, self._async_follow_up_events(locator), "loewe_epg_follow_up"
+                )
         else:
             _LOGGER.debug("ZapToMedia failed for locator %s", locator)
 
         return ok
+
+    async def _async_follow_up_events(self, locator: str) -> None:
+        """After a zap from HA, re-check the programme a few times until the EPG has it.
+
+        The immediate refresh after ZapToMedia usually finds no EPG data yet, and
+        coordinator refresh requests are debounced to one per poll interval, so
+        only the event calls are repeated here.
+        """
+        elapsed = 0
+        for delay in (2, 2, 3, 3):  # ~2, 4, 7 and 10 s after the zap
+            await asyncio.sleep(delay)
+            elapsed += delay
+            if self.current_locator != locator or not self.current_channel or self.current_event:
+                return
+            self._event_expires = 0.0  # force a fetch for the same channel
+            await self._async_update_events()
+            if self.current_event and self.data is not None:
+                _LOGGER.debug("Programme found ~%ss after channel change", elapsed)
+                self.async_set_updated_data(
+                    {**self.data, "event": self.current_event, "next_event": self.next_event}
+                )
+                return
 
     async def async_channel_up(self) -> None:
         from .const import LOEWE_RC_CODES

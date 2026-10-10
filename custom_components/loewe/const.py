@@ -16,6 +16,10 @@ CONF_CLIENT_MAC = "client_mac"
 DEFAULT_RESOURCE_PATH = "/loewe_tablet_0001"
 DEFAULT_POLL_INTERVAL = 10
 
+# Channel lists are fetched in pages of this size, up to MAX_CHANNELS per list
+CHANNEL_PAGE_SIZE = 50
+MAX_CHANNELS = 2000
+
 # Remote control key codes (based on Loewe RC spec)
 LOEWE_RC_CODES: dict[str, int] = {
     "pip": 10,

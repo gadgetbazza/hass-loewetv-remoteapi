@@ -1,6 +1,6 @@
 refresh_sources:
   name: Refresh Sources
-  description: Re-read the list of AV inputs (the Source dropdown) from the Loewe TV, e.g. after renaming an input on the TV.
+  description: Re-read the AV inputs (the Source dropdown) and the TV channel lists from the Loewe TV, e.g. after a channel scan or renaming an input.
   target:
     entity:
       integration: loewe
