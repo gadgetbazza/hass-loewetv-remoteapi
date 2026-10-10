@@ -40,10 +40,12 @@ jobs:
           LAST_TAG=$(git describe --tags --abbrev=0 $(git rev-list --tags --skip=1 --max-count=1) 2>/dev/null || echo "")
           if [ -z "$LAST_TAG" ]; then
             echo "No previous tag found, using all commits."
-            git log --pretty=format:"- %s" > CHANGELOG.txt
+            git log --pretty=tformat:"- %s" > CHANGELOG.txt
           else
-            git log $LAST_TAG..HEAD --pretty=format:"- %s" > CHANGELOG.txt
+            git log $LAST_TAG..HEAD --pretty=tformat:"- %s" > CHANGELOG.txt
           fi
+          # tformat (not format) ends every line with a newline, so the EOF
+          # delimiter below lands on its own line as GITHUB_OUTPUT requires
           echo "changelog<<EOF" >> $GITHUB_OUTPUT
           cat CHANGELOG.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
