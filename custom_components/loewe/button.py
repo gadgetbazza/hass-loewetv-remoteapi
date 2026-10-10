@@ -4,13 +4,13 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.button import ButtonEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .coordinator import LoeweTVCoordinator
-from .const import DOMAIN, LOEWE_RC_CODES
+from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
+from .const import LOEWE_RC_CODES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,11 +38,11 @@ RC_BUTTONS: dict[str, str] = {
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: LoeweConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Loewe TV buttons from a config entry."""
-    coordinator: LoeweTVCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     entities = [
         LoeweTVButton(coordinator, entry.entry_id, name, key)
         for name, key in RC_BUTTONS.items()
@@ -50,7 +50,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class LoeweTVButton(ButtonEntity):
+class LoeweTVButton(CoordinatorEntity[LoeweTVCoordinator], ButtonEntity):
     """Representation of a Loewe RC button in HA."""
 
     _attr_has_entity_name = True
@@ -63,8 +63,7 @@ class LoeweTVButton(ButtonEntity):
         name: str,
         rc_key: str,
     ) -> None:
-        self._coordinator = coordinator
-        self._entry_id = entry_id
+        super().__init__(coordinator)
         self._rc_key = rc_key
         self._attr_name = name
         self._attr_unique_id = f"{entry_id}_btn_{rc_key}"
@@ -72,7 +71,7 @@ class LoeweTVButton(ButtonEntity):
     @property
     def device_info(self) -> DeviceInfo:
         """Return Loewe device info so buttons group under the TV device."""
-        return self._coordinator.device_info
+        return self.coordinator.device_info
 
     async def async_press(self) -> None:
         """Send the RC key associated with this button."""
@@ -82,7 +81,7 @@ class LoeweTVButton(ButtonEntity):
             return
 
         _LOGGER.debug("LoeweTV Button pressed: %s (RC %s)", self._attr_name, keycode)
-        if await self._coordinator.async_inject_rc_key(keycode):
+        if await self.coordinator.async_inject_rc_key(keycode):
             _LOGGER.debug("%s command succeeded", self._attr_name)
         else:
             _LOGGER.warning("%s command failed", self._attr_name)

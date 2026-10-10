@@ -17,6 +17,8 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 ### Remote
 - Exposes a full `remote` entity
 - Supports RC key injection (numeric codes or symbolic names)
+- On/off follows the TV; `remote.turn_on` / `turn_off` wake the TV and put it into standby
+- `num_repeats` and `delay_secs` are supported; `hold_secs` is not (the TV treats a held key as a single press)
 
 ### Buttons
 - Optional button entities (disabled by default) for:

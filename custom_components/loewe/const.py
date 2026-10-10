@@ -8,7 +8,6 @@ DOMAIN = "loewe"
 CONF_HOST = "host"
 CONF_RESOURCE_PATH = "resource_path"
 CONF_CLIENT_ID = "client_id"
-CONF_DEVICE_UUID = "device_uuid"
 CONF_FCID = "fcid"
 CONF_TV_MAC = "tv_mac"
 CONF_CLIENT_MAC = "client_mac"
@@ -82,7 +81,15 @@ SOAP_PREFIX = "ltv"
 
 # Fields that should never be exposed in plain text (used by diagnostics)
 TO_REDACT: Final[Set[str]] = {
-    "client_id",
+    CONF_CLIENT_ID,
     "ClientId",  # Loewe API variant
-    "fcid",
+    CONF_FCID,
+    CONF_TV_MAC,
+    CONF_CLIENT_MAC,
+    "MAC-Address",
+    "MAC-Address-LAN",
+    "MAC-Address-WLAN",
+    "MAC-Address-BT",
+    "Location",
+    "unique_id",  # the TV's MAC
 }
