@@ -16,9 +16,11 @@ from .const import (
     CONF_CLIENT_MAC,
     CONF_CLIENT_ID,
     CONF_FCID,
+    CONF_TMDB_API_KEY,
     LOEWE_RC_CODES,
 )
 from .network import async_send_wol
+from .tmdb import TmdbArtwork
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -73,6 +75,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_locator: Optional[str] = None
         self._event_expires = 0.0
         self._channel_changed_at = 0.0
+        self.artwork: Optional[str] = None
+        self.tmdb: Optional[TmdbArtwork] = None
+        self._tmdb_key: Optional[str] = None
+        self.set_tmdb_key(entry.options.get(CONF_TMDB_API_KEY) if entry else None)
 
         # Session IDs and MACs persisted in the config entry (none during the config flow)
         data = entry.data if entry else {}
@@ -164,6 +170,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "channel": self.current_channel,
             "event": self.current_event,
             "next_event": self.next_event,
+            "artwork": self.artwork,
             "device": {
                 "ha_state": status.get("ha_state", "unknown"),
                 "volume": volume,
@@ -458,10 +465,22 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return item
         return next((c for c in self.favourite_channels if c.get("number") == query), None)
 
+    def set_tmdb_key(self, api_key: Optional[str]) -> bool:
+        """Turn programme artwork on (a TMDB API key) or off (None/empty); True if changed."""
+        api_key = (api_key or "").strip() or None
+        if api_key == self._tmdb_key:
+            return False
+        self._tmdb_key = api_key
+        self.tmdb = TmdbArtwork(self.hass, api_key) if api_key else None
+        self.artwork = None
+        self._event_expires = 0.0  # look the current programme up on the next poll
+        return True
+
     def _clear_now_playing(self) -> None:
         self.current_channel = None
         self.current_event = {}
         self.next_event = {}
+        self.artwork = None
         self._event_locator = None
         self._event_expires = 0.0
 
@@ -470,6 +489,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.current_channel:
             self.current_event = {}
             self.next_event = {}
+            self.artwork = None
             self._event_locator = None
             return
 
@@ -497,6 +517,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.current_event, self.next_event = {}, {}
                 break
         self._event_locator = self.current_locator
+        self.artwork = (
+            await self.tmdb.async_lookup(self.current_event.get("name")) if self.tmdb else None
+        )
 
         start = self.current_event.get("start")
         duration = self.current_event.get("duration")
@@ -567,7 +590,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.current_event and self.data is not None:
                 _LOGGER.debug("Programme found ~%ss after channel change", elapsed)
                 self.async_set_updated_data(
-                    {**self.data, "event": self.current_event, "next_event": self.next_event}
+                    {
+                        **self.data,
+                        "event": self.current_event,
+                        "next_event": self.next_event,
+                        "artwork": self.artwork,
+                    }
                 )
                 return
 

@@ -11,6 +11,7 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Volume control (fine step, absolute volume, mute toggle)
 - Source selection (HDMI, AV, tuner etc)
 - Now playing: channel name, programme title, duration/progress and next programme (from the TV's EPG)
+- Optional programme artwork from [TMDB](https://www.themoviedb.org/) (see [Programme artwork](#programme-artwork))
 - State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
 - Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
 
@@ -101,6 +102,15 @@ data:
 - Resource path defaults to `/loewe_tablet_0001`.
 - MAC address is captured for WOL.
 
+### Programme artwork
+The TV's guide has programme titles but no pictures. With a free TMDB API key the integration looks each programme title up on The Movie Database and shows its artwork on the media player.
+
+1. Create an account at [themoviedb.org](https://www.themoviedb.org/), then go to **Settings → API** and request a developer key.
+2. Copy the **API Key** (not the longer API Read Access Token).
+3. In Home Assistant go to **Settings → Devices & services → Loewe TV → Configure** and paste it in. Clear the field to turn artwork off.
+
+Only exact title matches are used, so films, dramas and well-known series get artwork, while news, sport and local programmes usually show none. The key is stored in Home Assistant's config entry and is redacted from diagnostics.
+
 ---
 
 ## Logging (optional)
@@ -120,6 +130,7 @@ logger:
 - The TV may need to `RequestAccess` again after certain power cycles, the integration automatically retries this in the background.  
 - Programme information comes from the TV's own EPG. Right after a channel change the TV can take a moment to provide it: changes made from Home Assistant show the programme within a couple of seconds, changes made with the TV's remote on the next poll (up to 10 seconds).
 - Channel logos are not shown: the TVs tested report logo URLs but do not serve them.
+- Programme artwork uses the TMDB API but is not endorsed or certified by TMDB.
 
 ---
 

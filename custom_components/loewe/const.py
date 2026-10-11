@@ -12,6 +12,9 @@ CONF_FCID = "fcid"
 CONF_TV_MAC = "tv_mac"
 CONF_CLIENT_MAC = "client_mac"
 
+# Options
+CONF_TMDB_API_KEY = "tmdb_api_key"
+
 DEFAULT_RESOURCE_PATH = "/loewe_tablet_0001"
 DEFAULT_POLL_INTERVAL = 10
 
@@ -124,4 +127,5 @@ TO_REDACT: Final[Set[str]] = {
     "MAC-Address-BT",
     "Location",
     "unique_id",  # the TV's MAC
+    CONF_TMDB_API_KEY,
 }

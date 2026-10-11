@@ -17,5 +17,20 @@
     "abort": {
       "already_configured": "This TV is already configured"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Loewe TV options",
+        "description": "Programme artwork: the TV's guide has no pictures, so programme titles can be looked up on The Movie Database (TMDB). Enter a free TMDB API key (themoviedb.org > Settings > API, the \"API Key\", not the Read Access Token) to turn this on, or clear it to turn it off.",
+        "data": {
+          "tmdb_api_key": "TMDB API key"
+        }
+      }
+    },
+    "error": {
+      "invalid_tmdb_key": "TMDB did not accept this API key",
+      "tmdb_cannot_connect": "Could not reach TMDB to check the key; try again"
+    }
   }
 }

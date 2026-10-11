@@ -135,6 +135,11 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         return self.coordinator.current_source_name
 
     @property
+    def media_image_url(self) -> str | None:
+        """Programme artwork from TMDB (only when an API key is set in the options)."""
+        return (self.coordinator.data or {}).get("artwork") if self._channel else None
+
+    @property
     def media_duration(self) -> int | None:
         return self._event.get("duration") if self._channel else None
 
