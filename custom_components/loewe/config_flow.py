@@ -6,10 +6,17 @@ import asyncio
 import logging
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.selector import (
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .const import (
     DOMAIN,
@@ -19,11 +26,13 @@ from .const import (
     CONF_FCID,
     CONF_TV_MAC,
     CONF_CLIENT_MAC,
+    CONF_TMDB_API_KEY,
     DEFAULT_RESOURCE_PATH,
 )
 from .coordinator import LoeweTVCoordinator
 from .network import async_get_device_mac
 from .parsers import device_mac
+from .tmdb import TmdbArtwork, TmdbAuthError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +48,13 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Loewe TV Remote API."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> LoeweTVOptionsFlow:
+        return LoeweTVOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -133,3 +149,38 @@ class LoeweTVConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         return self.async_create_entry(title=f"Loewe TV ({host})", data=data)
+
+
+class LoeweTVOptionsFlow(config_entries.OptionsFlow):
+    """Options: the TMDB API key used for programme artwork."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        # The handler is the entry ID (works on HA versions before OptionsFlow.config_entry)
+        entry = self.hass.config_entries.async_get_entry(self.handler)
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            api_key = (user_input.get(CONF_TMDB_API_KEY) or "").strip()
+            if api_key:
+                try:
+                    await TmdbArtwork(self.hass, api_key).async_validate()
+                except TmdbAuthError:
+                    errors[CONF_TMDB_API_KEY] = "invalid_tmdb_key"
+                except (aiohttp.ClientError, asyncio.TimeoutError):
+                    errors["base"] = "tmdb_cannot_connect"
+            if not errors:
+                return self.async_create_entry(
+                    data={**entry.options, CONF_TMDB_API_KEY: api_key}
+                )
+
+        current = entry.options.get(CONF_TMDB_API_KEY, "")
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_TMDB_API_KEY, description={"suggested_value": current}
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

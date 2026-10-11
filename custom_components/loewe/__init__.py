@@ -16,6 +16,7 @@ from .const import (
     CONF_RESOURCE_PATH,
     CONF_TV_MAC,
     CONF_CLIENT_MAC,
+    CONF_TMDB_API_KEY,
     DEFAULT_RESOURCE_PATH,
     PLATFORMS,
 )
@@ -103,8 +104,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: LoeweConfigEntry) -> boo
     _async_update_tv_identity(hass, entry, coordinator)
 
     entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
+
+async def _async_entry_updated(hass: HomeAssistant, entry: LoeweConfigEntry) -> None:
+    """Apply changed options without a reload.
+
+    Also called when the coordinator stores a renewed session in the entry's
+    data, so only the options are looked at.
+    """
+    coordinator = entry.runtime_data
+    if coordinator.set_tmdb_key(entry.options.get(CONF_TMDB_API_KEY)):
+        await coordinator.async_request_refresh()
 
 
 def _async_update_tv_identity(
