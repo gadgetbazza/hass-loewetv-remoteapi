@@ -33,6 +33,14 @@ import time
 
 _LOGGER = logging.getLogger(__name__)
 
+# Waking from standby, the TV drops off the network for ~30 s while it boots
+# (picture already on). Within POWER_ON_GRACE of a power-on, a lost connection
+# means it is booting and it is reported on; a TV that was just on keeps its
+# state through a drop of up to RECONNECT_GRACE. Switched off normally, it
+# stays reachable and reports standby, so "off" is still immediate.
+RECONNECT_GRACE = 45
+POWER_ON_GRACE = 60
+
 type LoeweConfigEntry = ConfigEntry[LoeweTVCoordinator]
 
 
@@ -75,6 +83,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._event_locator: Optional[str] = None
         self._event_expires = 0.0
         self._channel_changed_at = 0.0
+        self._last_on_at = 0.0
+        self._power_on_at = 0.0
         self.artwork: Optional[str] = None
         self.tmdb: Optional[TmdbArtwork] = None
         self._tmdb_key: Optional[str] = None
@@ -101,6 +111,16 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # --- Step 1: status first (determines power/session validity).
         # _safe_request repairs the session itself if the reply comes back empty.
         status_resp = await self._safe_request("GetCurrentStatus")
+        if status_resp is None and self.data is not None:
+            if time.monotonic() - self._power_on_at < POWER_ON_GRACE:
+                # Asked to power on and now off the network: it is booting
+                # (picture on, control not ready yet). Report it on.
+                _LOGGER.debug("Loewe TV not answering after power-on; reporting it on while it boots")
+                device = {**(self.data.get("device") or {}), "ha_state": MediaPlayerState.ON}
+                return {**self.data, "device": device}
+            if time.monotonic() - self._last_on_at < RECONNECT_GRACE:
+                _LOGGER.debug("Loewe TV briefly not answering; keeping the last state")
+                return self.data
         if status_resp is None:
             # TV in deep sleep or network unreachable -> report OFF
             if self._reachable:
@@ -120,6 +140,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         status = parsers.parse_status(status_resp)
         if not status:
             raise UpdateFailed("Loewe TV returned an empty status, even after re-pairing")
+        if status.get("ha_state") == MediaPlayerState.ON:
+            self._last_on_at = time.monotonic()
 
         # After status is valid, ensure we have sources and channels
         if not self._sources_loaded:
@@ -324,8 +346,23 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Put the TV into standby with the discrete power-off key."""
         return await self.async_inject_rc_key(LOEWE_RC_CODES["power_off"])
 
+    async def _async_follow_up_power_on(self) -> None:
+        """Poll every 3 s for up to ~30 s after a power-on until the TV reports on,
+        instead of waiting for the next regular poll."""
+        for _ in range(10):
+            await asyncio.sleep(3)
+            await self.async_refresh()
+            device = (self.data or {}).get("device", {})
+            if device.get("ha_state") == MediaPlayerState.ON:
+                return
+
     async def async_power_on(self) -> bool:
         """Wake the TV: Wake-on-LAN (if the MAC is known), then the discrete power-on key."""
+        self._power_on_at = time.monotonic()
+        if self._entry:
+            self._entry.async_create_background_task(
+                self.hass, self._async_follow_up_power_on(), "loewe_power_on_follow_up"
+            )
         if self.tv_mac:
             try:
                 _LOGGER.debug("Sending Wake-on-LAN to %s", self.tv_mac)
