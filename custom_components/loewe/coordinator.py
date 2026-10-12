@@ -41,6 +41,13 @@ _LOGGER = logging.getLogger(__name__)
 RECONNECT_GRACE = 45
 POWER_ON_GRACE = 60
 
+# Loaded while the TV is still starting up, AV inputs come back with
+# placeholder names (e.g. "#3055 1" for an input named "Apple TV"). Such a
+# list is fetched again, every AV_NAMES_RETRY seconds while the TV is on, up
+# to AV_NAMES_ATTEMPTS times (an input might genuinely keep such a name).
+AV_NAMES_RETRY = 30
+AV_NAMES_ATTEMPTS = 10
+
 type LoeweConfigEntry = ConfigEntry[LoeweTVCoordinator]
 
 
@@ -77,6 +84,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._channels_by_uuid: dict[str, dict[str, str]] = {}
         self._channels_by_key: dict[str, dict[str, str]] = {}
         self._sources_loaded = False
+        self._avlist_view: Optional[str] = None
+        self._av_names_attempts = 0
+        self._av_names_checked_at = 0.0
         self.current_channel: Optional[dict[str, str]] = None
         self.current_event: dict[str, Any] = {}
         self.next_event: dict[str, Any] = {}
@@ -149,6 +159,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.async_refresh_sources()
             except Exception as e:
                 _LOGGER.debug("Unable to refresh sources: %s", e)
+        elif status.get("ha_state") == MediaPlayerState.ON:
+            await self._async_retry_av_names()
 
         # --- Step 2: remaining calls only if status was valid
         playback_resp = await self._safe_request("GetCurrentPlayback")
@@ -444,7 +456,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         favlist = first("favlist")
         fulllist = first("fastscan")
 
+        self._avlist_view = avlist["view"] if avlist else None
         self.available_sources = await self.async_get_channel_list(avlist["view"]) if avlist else []
+        self._av_names_attempts = 0
+        self._av_names_checked_at = time.monotonic()
         self.favourite_channels = await self.async_get_channel_list(favlist["view"]) if favlist else []
         self.all_channels = await self.async_get_channel_list(fulllist["view"]) if fulllist else []
         self._index_channels()
@@ -453,6 +468,26 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Loaded %d AV sources, %d favourite channels, %d channels in total",
             len(self.available_sources), len(self.favourite_channels), len(self.all_channels),
         )
+
+    @staticmethod
+    def _has_placeholder_names(sources: list[dict[str, str]]) -> bool:
+        return any(src["name"].startswith("#") for src in sources)
+
+    async def _async_retry_av_names(self) -> None:
+        """Fetch the AV inputs again if they were loaded with placeholder names."""
+        if (
+            not self._avlist_view
+            or self._av_names_attempts >= AV_NAMES_ATTEMPTS
+            or time.monotonic() - self._av_names_checked_at < AV_NAMES_RETRY
+            or not self._has_placeholder_names(self.available_sources)
+        ):
+            return
+        self._av_names_attempts += 1
+        self._av_names_checked_at = time.monotonic()
+        sources = await self.async_get_channel_list(self._avlist_view)
+        if sources:
+            self.available_sources = sources
+            _LOGGER.debug("Reloaded AV source names: %s", [src["name"] for src in sources])
 
     # ---------------------- Channel lookup / Now playing ----------------------
 
