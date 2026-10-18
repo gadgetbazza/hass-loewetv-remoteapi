@@ -31,6 +31,7 @@ RC_BUTTONS: dict[str, str] = {
     "Left": "left",
     "Up": "up",
     "Down": "down",
+    "OK": "ok",
     "Home": "media",
     "Back": "end",
 }
