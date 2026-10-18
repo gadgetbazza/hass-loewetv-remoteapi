@@ -5,7 +5,6 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from homeassistant.components import persistent_notification
 from homeassistant.components.media_player import (
     BrowseError,
     BrowseMedia,
@@ -18,9 +17,11 @@ from homeassistant.components.media_player import (
 from homeassistant.const import STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
+from homeassistant.util import slugify
 
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
@@ -384,19 +385,43 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             start=dt_util.utc_from_timestamp(begin),
             end=dt_util.utc_from_timestamp(finish),
         )
-        # The media panel gives no feedback and shows its cached page (without
-        # the ●) on Back, so confirm with a notification. One per TV: each
-        # recording set from the guide replaces the previous one.
+        # The media panel gives no feedback (and shows its cached page, without
+        # the ●, on Back), so confirm on the phone of the person who asked
         programmes = await self.coordinator.async_get_guide(channel)
         title = next((p["title"] for p in programmes if p["start"] == begin), "Recording")
         start_at = dt_util.as_local(dt_util.utc_from_timestamp(begin))
         end_at = dt_util.as_local(dt_util.utc_from_timestamp(finish))
-        persistent_notification.async_create(
-            self.hass,
+        tv = state.name if (state := self.hass.states.get(self.entity_id)) else "Loewe TV"
+        await self._async_notify_requester(
+            f"{tv}: recording set",
             f"{title}, {channel['name']}, {start_at:%a %d %b %H:%M}–{end_at:%H:%M}",
-            title=f"{state.name if (state := self.hass.states.get(self.entity_id)) else 'Loewe TV'}: recording set",
-            notification_id=f"loewe_record_{self.unique_id}",
         )
+
+    async def _async_notify_requester(self, title: str, message: str) -> None:
+        """Push a message to the phone(s) the requesting user's person tracks with the
+        companion app. Nothing is sent for automations or users without one."""
+        user_id = self._context.user_id if self._context else None
+        if not user_id:
+            return
+        registry = er.async_get(self.hass)
+        services = set()
+        for person in self.hass.states.async_all("person"):
+            if person.attributes.get("user_id") != user_id:
+                continue
+            for tracker in person.attributes.get("device_trackers", []):
+                entry = registry.async_get(tracker)
+                if not entry or entry.platform != "mobile_app" or not entry.config_entry_id:
+                    continue
+                app = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+                if app and (name := app.data.get("device_name")):
+                    services.add(f"mobile_app_{slugify(name)}")
+        for service in services:
+            if self.hass.services.has_service("notify", service):
+                await self.hass.services.async_call(
+                    "notify", service, {"title": title, "message": message}, blocking=False
+                )
+        if not services:
+            _LOGGER.debug("No companion app phone found for user %s; recording not confirmed", user_id)
 
     # ---------- Recordings ----------
     async def _async_browse_recordings(self) -> BrowseMedia:
