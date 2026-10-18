@@ -113,6 +113,58 @@ Only exact title matches are used, so films, dramas and well-known series get ar
 
 ---
 
+## Dashboard example
+
+A remote control card that brings the media player and remote together. It uses two popular
+frontend cards, both installable from HACS: [mini-media-player](https://github.com/kalkih/mini-media-player)
+for power, volume, source and now playing, and
+[Universal Remote Card](https://github.com/Nerwyn/android-tv-card) for the keys. Replace
+`lounge_tv` with your own entity names.
+
+```yaml
+type: vertical-stack
+cards:
+  - type: custom:mini-media-player
+    entity: media_player.lounge_tv
+    artwork: cover
+    info: scroll
+    source: icon
+    volume_stateless: true
+  - type: custom:universal-remote-card
+    platform: Generic Remote
+    remote_id: remote.lounge_tv
+    rows:
+      - [back, home, menu, recordings]
+      - [circlepad]
+      - [channel_down, guide, info, channel_up]
+      - [red, green, yellow, blue]
+    custom_actions:
+      - type: circlepad
+        name: circlepad
+        tap_action: {action: key, key: ok}
+        up: {icon: mdi:chevron-up, tap_action: {action: key, key: up}, hold_action: {action: repeat}}
+        down: {icon: mdi:chevron-down, tap_action: {action: key, key: down}, hold_action: {action: repeat}}
+        left: {icon: mdi:chevron-left, tap_action: {action: key, key: left}, hold_action: {action: repeat}}
+        right: {icon: mdi:chevron-right, tap_action: {action: key, key: right}, hold_action: {action: repeat}}
+      - {type: button, name: back, icon: mdi:keyboard-backspace, tap_action: {action: key, key: end}}
+      - {type: button, name: home, icon: mdi:home, tap_action: {action: key, key: media}}
+      - {type: button, name: menu, icon: mdi:menu, tap_action: {action: key, key: menu}}
+      - {type: button, name: recordings, icon: mdi:filmstrip-box-multiple, tap_action: {action: key, key: recordings}}
+      - {type: button, name: channel_down, icon: mdi:minus-box, tap_action: {action: key, key: prog_down}}
+      - {type: button, name: guide, icon: mdi:television-guide, tap_action: {action: key, key: epg}}
+      - {type: button, name: info, icon: mdi:information-outline, tap_action: {action: key, key: info}}
+      - {type: button, name: channel_up, icon: mdi:plus-box, tap_action: {action: key, key: prog_up}}
+      - {type: button, name: red, icon: mdi:square-rounded, tap_action: {action: key, key: red}, styles: ":host { --icon-color: #d32f2f; }"}
+      - {type: button, name: green, icon: mdi:square-rounded, tap_action: {action: key, key: green}, styles: ":host { --icon-color: #388e3c; }"}
+      - {type: button, name: yellow, icon: mdi:square-rounded, tap_action: {action: key, key: yellow}, styles: ":host { --icon-color: #fbc02d; }"}
+      - {type: button, name: blue, icon: mdi:square-rounded, tap_action: {action: key, key: blue}, styles: ":host { --icon-color: #1976d2; }"}
+```
+
+Any key from the [Remote](#remote) table can be added the same way. `recordings` opens the DR+ archive
+on TVs with a recorder; drop it from `rows` if yours has none.
+
+---
+
 ## Logging (optional)
 
 Enable debug logs for troubleshooting:
