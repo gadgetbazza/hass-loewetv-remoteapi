@@ -334,3 +334,43 @@ def parse_result(xml: Optional[str]) -> Optional[int]:
         return int((found.text or "").strip()) if found is not None else None
     except ValueError:
         return None
+
+
+# de.loewe.sl2.epg fields requested by the guide, in this order (API spec 9.22.1;
+# meanings of 2003/2005/2008 found by testing)
+EPG_FIELDS = (2003, 2004, 2005, 2007, 2008)  # event id, title, description, start, end
+
+
+def parse_guide(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """
+    Parse a CreateIterator reply over the EPG table (fields EPG_FIELDS).
+
+    Returns [{"event_id", "title", "description", "start", "end"}] with Unix
+    timestamps, or None if the reply has no rows element (no answer, or refused).
+    """
+    resp = _extract_response_body(xml)
+    rows = _find(resp, "Rows") if resp is not None else None
+    if rows is None:
+        return None
+
+    programmes = []
+    for row in rows:
+        if _local(row.tag) != "Row":
+            continue
+        values = [(v.text or "").strip() for v in row if _local(v.tag) == "V"]
+        if len(values) < len(EPG_FIELDS):
+            continue
+        event_id, title, description, start, end = values[: len(EPG_FIELDS)]
+        try:
+            start_ts, end_ts = int(start), int(end)
+        except ValueError:
+            continue
+        if title:
+            programmes.append({
+                "event_id": event_id or None,
+                "title": title,
+                "description": description or None,
+                "start": start_ts,
+                "end": end_ts,
+            })
+    return programmes

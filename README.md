@@ -14,6 +14,7 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Optional programme artwork from [TMDB](https://www.themoviedb.org/) (see [Programme artwork](#programme-artwork))
 - State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
 - Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
+- **Guide** in the media browser: about a week of programmes per channel from the TV's own guide, with **Record** (and **Watch** for what's on now) on each programme (see [Programme guide](#programme-guide))
 
 ### Remote
 - Exposes a full `remote` entity
@@ -60,6 +61,7 @@ data:
 - `loewe.refresh_sources`: re-read the AV inputs and channel lists from the TV (e.g. after a channel scan or renaming an input). Channels and inputs are otherwise loaded once at startup.
 - `loewe.channel_up` / `loewe.channel_down`: step through the TV's channels.
 - `loewe.record`: programme a recording on the TV's DR+ recorder (see [Recording](#recording)).
+- `loewe.get_guide`: return a channel's programmes from the TV's guide (see [Programme guide](#programme-guide)).
 
 ### Switching channels from automations
 `media_player.play_media` accepts a channel name, a favourites number or a channel locator:
@@ -97,8 +99,8 @@ data:
   repeat_days: [sat]
 ```
 
-- The TV's API only gives the guide for the channel it is showing (now and next), so `programme`
-  works for that channel only. For other channels give a start time.
+- `programme` (current/next) uses the channel the TV is showing. To record anything else, pick it in
+  the media browser's [Guide](#programme-guide), or give a channel and start time.
 - The TV names the recording after the guide entry its time matches, otherwise "Recording".
 - Timers can't be changed or cancelled through the API: do that in the TV's timer list.
 - The TV accepting a timer doesn't guarantee it will record (a clash with another timer can need
@@ -117,6 +119,27 @@ tap_action:
   data:
     programme: next
 ```
+
+### Programme guide
+The media browser's **Guide** folder lists your favourite channels (all channels if you have no
+favourites). Open a channel, then a day, to see its programmes. Open a programme for its description
+and **Record** (plus **Watch** while it is on). Programmes already set to record are marked ●. The
+guide is the TV's own, read from it on demand (cached for 10 minutes), so it covers what the TV's
+guide covers, usually about a week.
+
+`loewe.get_guide` returns the same data for automations or custom cards:
+
+```yaml
+action: loewe.get_guide
+target:
+  entity_id: media_player.lounge_tv
+data:
+  channel: "BBC TWO"   # default: the channel the TV is showing
+  hours: 24            # how far ahead
+response_variable: guide
+```
+
+`guide.programmes` is a list of `title`, `description`, `start` and `end` (local ISO times).
 
 ### Diagnostics
 - Device info (Chassis, SW version, MACs)

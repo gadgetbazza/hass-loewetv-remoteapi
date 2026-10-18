@@ -56,6 +56,10 @@ AV_NAMES_ATTEMPTS = 10
 TIMERS_POLL_INTERVAL = 300
 TIMERS_EDGE_DELAY = 30
 
+# A channel's guide (a week of programmes) is read in one request and kept this long
+GUIDE_CACHE_SECONDS = 600
+GUIDE_MAX_PROGRAMMES = 1000
+
 # ProgramTimer's repeatDays bitmask (API spec 9.13)
 REPEAT_DAY_BITS = {"sun": 0x01, "mon": 0x02, "tue": 0x04, "wed": 0x08, "thu": 0x10, "fri": 0x20, "sat": 0x40}
 
@@ -111,6 +115,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.timers: Optional[list[dict[str, Any]]] = None
         self._timers_checked_at = 0.0
         self._timers_due_at = 0.0  # wall-clock time of the next timer start/end
+        # Programme guide per channel key: (fetched at, programmes)
+        self._guides: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self.tmdb: Optional[TmdbArtwork] = None
         self._tmdb_key: Optional[str] = None
         self.set_tmdb_key(entry.options.get(CONF_TMDB_API_KEY) if entry else None)
@@ -515,6 +521,13 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ---------------------- Channel lookup / Now playing ----------------------
 
+    def channel_key(self, channel: dict[str, str]) -> str:
+        """Key identifying a cached TV channel, e.g. in media browser IDs."""
+        return self._channel_key(channel["locator"])
+
+    def channel_by_key(self, key: str) -> Optional[dict[str, str]]:
+        return self._channels_by_key.get(key)
+
     @staticmethod
     def _channel_key(locator: str) -> str:
         """Key identifying a channel independent of the list it was tuned from.
@@ -776,6 +789,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if end is not None
                 else begin + int(duration.total_seconds())
             )
+            begin = max(begin, int(now))  # already under way: record the rest
         if finish <= max(begin, now):
             raise ServiceValidationError("That recording would already have ended")
 
@@ -804,6 +818,76 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_refresh_timers()
         if self.data is not None:
             self.async_set_updated_data({**self.data, "timers": self.timers})
+
+    # ---------------------- Programme guide ----------------------
+
+    @staticmethod
+    def dvb_triplet(channel: dict[str, str]) -> Optional[tuple[int, int, int]]:
+        """(original network ID, transport stream ID, service ID) of a TV channel.
+
+        A channel's mediaItemUuid ends in them as 4 hex digits each, with
+        "ffff" between the network and transport stream IDs, e.g.
+        "chl0:00-0002233affff104410bf" -> (0x233a, 0x1044, 0x10bf).
+        """
+        uuid = channel.get("uuid") or ""
+        digits = uuid.rsplit("-", 1)[-1]
+        if not uuid.startswith("chl") or len(digits) < 16:
+            return None
+        try:
+            return int(digits[-16:-12], 16), int(digits[-8:-4], 16), int(digits[-4:], 16)
+        except ValueError:
+            return None
+
+    async def async_get_guide(self, channel: dict[str, str]) -> list[dict[str, Any]]:
+        """Programmes on a channel from the one on now to the end of the TV's guide (about a week).
+
+        Read from the TV's own EPG table with an iterator; cached for GUIDE_CACHE_SECONDS.
+        Raises HomeAssistantError if the channel has no DVB IDs or the TV doesn't answer.
+        """
+        key = self._channel_key(channel["locator"])
+        now = time.time()
+        cached = self._guides.get(key)
+        if cached and now - cached[0] < GUIDE_CACHE_SECONDS:
+            return [p for p in cached[1] if p["end"] > now]
+
+        triplet = self.dvb_triplet(channel)
+        if not triplet:
+            raise HomeAssistantError(f"No guide available for {channel['name']}")
+        onid, tsid, sid = triplet
+
+        def selection(field: int, condition: int, value: int) -> str:
+            return (
+                f"<{SOAP_PREFIX}:Selection><{SOAP_PREFIX}:Field>{field}</{SOAP_PREFIX}:Field>"
+                f"<{SOAP_PREFIX}:Condition>{condition}</{SOAP_PREFIX}:Condition>"
+                f"<{SOAP_PREFIX}:Value>{value}</{SOAP_PREFIX}:Value></{SOAP_PREFIX}:Selection>"
+            )
+
+        fields = "".join(f"<{SOAP_PREFIX}:Field>{f}</{SOAP_PREFIX}:Field>" for f in parsers.EPG_FIELDS)
+        # Condition 1 is "equals"; seeking to the first programme whose end
+        # (2008) is after now (condition 5) starts the list at the one on now.
+        extra = (
+            f"<{SOAP_PREFIX}:TableName>de.loewe.sl2.epg</{SOAP_PREFIX}:TableName>"
+            f"<{SOAP_PREFIX}:Type>0</{SOAP_PREFIX}:Type>"
+            f"<{SOAP_PREFIX}:Selections>{selection(2002, 1, onid)}{selection(2000, 1, sid)}"
+            f"{selection(2001, 1, tsid)}</{SOAP_PREFIX}:Selections>"
+            f"<{SOAP_PREFIX}:Fields>{fields}</{SOAP_PREFIX}:Fields>"
+            f"<{SOAP_PREFIX}:Orders><{SOAP_PREFIX}:Order><{SOAP_PREFIX}:Field>2007</{SOAP_PREFIX}:Field>"
+            f"<{SOAP_PREFIX}:Direction>1</{SOAP_PREFIX}:Direction></{SOAP_PREFIX}:Order></{SOAP_PREFIX}:Orders>"
+            f"<{SOAP_PREFIX}:NotifyUpdate>NO</{SOAP_PREFIX}:NotifyUpdate>"
+            f'<{SOAP_PREFIX}:QueryParameters><{SOAP_PREFIX}:Range startIndex="0" maxItems="{GUIDE_MAX_PROGRAMMES}"/>'
+            f"</{SOAP_PREFIX}:QueryParameters>"
+            f"<{SOAP_PREFIX}:SeekToContentParameters><{SOAP_PREFIX}:Selections>{selection(2008, 5, int(now))}"
+            f"</{SOAP_PREFIX}:Selections><{SOAP_PREFIX}:Which>0</{SOAP_PREFIX}:Which>"
+            f"<{SOAP_PREFIX}:Offset>0</{SOAP_PREFIX}:Offset><{SOAP_PREFIX}:WindowSize>0</{SOAP_PREFIX}:WindowSize>"
+            f"</{SOAP_PREFIX}:SeekToContentParameters>"
+        )
+        programmes = parsers.parse_guide(await self._safe_request("CreateIterator", extra_xml=extra))
+        if programmes is None:
+            raise HomeAssistantError(f"The Loewe TV didn't send the guide for {channel['name']}")
+        programmes = [{**p, "channel_id": key} for p in programmes if p["end"] > now]
+        self._guides[key] = (now, programmes)
+        _LOGGER.debug("Guide for %s: %d programmes", channel["name"], len(programmes))
+        return programmes
 
 
 def _local_datetime(value: datetime) -> datetime:
