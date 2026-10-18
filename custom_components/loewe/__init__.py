@@ -7,10 +7,12 @@ import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID, ENTITY_MATCH_ALL
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
@@ -38,6 +40,14 @@ RECORD_SCHEMA = vol.Schema(
         vol.Optional("end"): cv.datetime,
         vol.Optional("duration"): cv.positive_time_period,
         vol.Optional("repeat"): vol.In(list(REPEAT_DAYS)),
+    }
+)
+
+GET_GUIDE_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTITY_ID): cv.comp_entity_ids,
+        vol.Optional("channel"): cv.string,
+        vol.Optional("hours", default=24): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=192)),
     }
 )
 
@@ -93,10 +103,47 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         for coordinator in _target_coordinators(hass, call):
             await coordinator.async_record(**options)
 
+    async def handle_get_guide(call: ServiceCall) -> ServiceResponse:
+        """Return a channel's programmes from the TV's guide (the first targeted TV)."""
+        coordinators = _target_coordinators(hass, call)
+        if not coordinators:
+            raise ServiceValidationError("No Loewe TV to read the guide from")
+        coordinator = coordinators[0]
+        query = call.data.get("channel")
+        if query:
+            found = coordinator.find_channel(query)
+            channel = coordinator.lookup_channel(found["locator"]) if found else None
+            if not channel:
+                raise ServiceValidationError(f"No TV channel called {query!r} on the Loewe TV")
+        elif not (channel := coordinator.current_channel):
+            raise ServiceValidationError("The Loewe TV isn't showing a TV channel; give a channel")
+        until = dt_util.utcnow().timestamp() + call.data["hours"] * 3600
+
+        def iso(timestamp: int) -> str:
+            return dt_util.as_local(dt_util.utc_from_timestamp(timestamp)).isoformat()
+
+        return {
+            "channel": channel["name"],
+            "programmes": [
+                {
+                    "title": p["title"],
+                    "description": p["description"],
+                    "start": iso(p["start"]),
+                    "end": iso(p["end"]),
+                }
+                for p in await coordinator.async_get_guide(channel)
+                if p["start"] < until
+            ],
+        }
+
     hass.services.async_register(DOMAIN, "channel_up", handle_channel_up)
     hass.services.async_register(DOMAIN, "channel_down", handle_channel_down)
     hass.services.async_register(DOMAIN, "refresh_sources", handle_refresh_sources)
     hass.services.async_register(DOMAIN, "record", handle_record, schema=RECORD_SCHEMA)
+    hass.services.async_register(
+        DOMAIN, "get_guide", handle_get_guide, schema=GET_GUIDE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
     return True
 
 

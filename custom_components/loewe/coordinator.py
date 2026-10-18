@@ -56,6 +56,13 @@ AV_NAMES_ATTEMPTS = 10
 TIMERS_POLL_INTERVAL = 300
 TIMERS_EDGE_DELAY = 30
 
+# A channel's guide (a week of programmes) is read in one request and kept this long
+GUIDE_CACHE_SECONDS = 600
+# ...from this long ago, so a timer still in the TV's post-recording margin
+# can be named after a programme that has just ended
+GUIDE_PAST_SECONDS = 3 * 3600
+GUIDE_MAX_PROGRAMMES = 1000
+
 # ProgramTimer's repeatDays is documented as a weekday bitmask, but the TV
 # (SL420, SW 5.4) only turns it into its own types: weekdays alone give
 # "Mon-Fri", any weekend day gives "Daily". Its Weekly and Series types can't
@@ -88,6 +95,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.available_sources: list[dict[str, str]] = []
         self.current_locator: Optional[str] = None
         self.last_tv_locator: Optional[str] = None
+        # GetCurrentPlayback's Mode ("drplus" while a recording plays), and the
+        # recording's title/artwork when HA started it (the TV doesn't say which)
+        self.playback_mode: Optional[str] = None
+        self.recording_title: Optional[str] = None
+        self.recording_artwork: Optional[str] = None
         self._device_info: dict[str, Any] = {}
         self.device_name: Optional[str] = None
         self._reachable = True
@@ -114,6 +126,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.timers: Optional[list[dict[str, Any]]] = None
         self._timers_checked_at = 0.0
         self._timers_due_at = 0.0  # wall-clock time of the next timer start/end
+        # Programme guide per channel key: (fetched at, programmes)
+        self._guides: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self.tmdb: Optional[TmdbArtwork] = None
         self._tmdb_key: Optional[str] = None
         self.set_tmdb_key(entry.options.get(CONF_TMDB_API_KEY) if entry else None)
@@ -198,13 +212,17 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         volume = parsers.parse_volume(volume_resp)
         mute = parsers.parse_mute(mute_resp)
 
-        # Remember last TV channel locator if current playback is not an AV source
+        # Remember the last TV channel (not an AV input, nor a recording, whose
+        # locator reads "[DR+ URI]" while it plays)
         if playback and (locator := playback.get("Locator")):
-            av_locators = {s["locator"] for s in self.available_sources if "locator" in s}
-            if locator not in av_locators:
+            if locator.startswith("channel://") and not self._is_av_locator(locator):
                 if locator != self.last_tv_locator:
                     _LOGGER.debug("Updating last TV locator to %s", locator)
                     self.last_tv_locator = locator
+        if playback:
+            self.playback_mode = playback.get("Mode")
+            if self.playback_mode != "drplus":
+                self.recording_title = self.recording_artwork = None
 
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
@@ -331,7 +349,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def current_source_name(self) -> Optional[str]:
-        """Name of the active input: an AV source name, "TV", or None if unknown."""
+        """Name of the active input: an AV source name, "TV", "Recording", or None if unknown."""
+        if self.playback_mode == "drplus":
+            return "Recording"
         loc = self.current_locator
         if not loc:
             return None
@@ -518,6 +538,13 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     # ---------------------- Channel lookup / Now playing ----------------------
 
+    def channel_key(self, channel: dict[str, str]) -> str:
+        """Key identifying a cached TV channel, e.g. in media browser IDs."""
+        return self._channel_key(channel["locator"])
+
+    def channel_by_key(self, key: str) -> Optional[dict[str, str]]:
+        return self._channels_by_key.get(key)
+
     @staticmethod
     def _channel_key(locator: str) -> str:
         """Key identifying a channel independent of the list it was tuned from.
@@ -615,6 +642,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self.current_event, self.next_event = {}, {}
                 break
+        if not self.current_event:
+            # The TV's now/next calls sometimes answer empty for a while (seen
+            # after playing a recording); the guide still has the programmes
+            self.current_event, self.next_event = await self._async_events_from_guide(
+                self.current_channel
+            )
         self._event_locator = self.current_locator
         self.artwork = (
             await self.tmdb.async_lookup(self.current_event.get("name")) if self.tmdb else None
@@ -711,6 +744,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._timers_checked_at = time.monotonic()
         timers = parsers.parse_timer_list(await self._safe_request("GetTimerList"))
         if timers is not None:
+            await self._async_name_timers(timers)
             self.timers = timers
         now = time.time()
         edges = [
@@ -720,6 +754,55 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if edge is not None and edge + TIMERS_EDGE_DELAY > now
         ]
         self._timers_due_at = min(edges, default=0.0)
+
+    async def _async_events_from_guide(
+        self, channel: dict[str, str]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The current and next programme on a channel from the guide, as parse_event dicts."""
+        try:
+            programmes = await self.async_get_guide(channel)
+        except HomeAssistantError:
+            return {}, {}
+        now = time.time()
+
+        def event(programme: Optional[dict[str, Any]]) -> dict[str, Any]:
+            if not programme:
+                return {}
+            return {
+                "name": programme["title"],
+                "info": programme["description"] or "",
+                "start": programme["start"],
+                "duration": programme["end"] - programme["start"],
+                "locator": channel["locator"],
+            }
+
+        on_now = next((p for p in programmes if p["start"] <= now < p["end"]), None)
+        after = next((p for p in programmes if p["start"] >= (on_now["end"] if on_now else now)), None)
+        return event(on_now), event(after)
+
+    async def _async_name_timers(self, timers: list[dict[str, Any]]) -> None:
+        """Give timers the TV left as "Recording" the title of the programme they cover.
+
+        The TV is meant to take the title from the guide, but timers set through
+        the API keep the default name (and no EPG event ID).
+        """
+        for timer in timers:
+            if timer["title"] not in (None, "Recording") or timer["start"] is None or timer["end"] is None:
+                continue
+            channel = self._channels_by_key.get(timer.get("channel_id") or "")
+            if not channel:
+                continue
+            try:
+                programmes = await self.async_get_guide(channel, include_ended=True)
+            except HomeAssistantError:
+                continue
+
+            def overlap(programme: dict[str, Any]) -> int:
+                return min(programme["end"], timer["end"]) - max(programme["start"], timer["start"])
+
+            best = max(programmes, key=overlap, default=None)
+            if best and overlap(best) > 0:
+                timer["title"] = best["title"]
 
     async def async_record(
         self,
@@ -736,8 +819,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Either `programme` ("current" or "next" on the tuned channel, timed from
         the EPG) or `start` plus `end` or `duration` (on `channel`, default the
         tuned one), optionally repeating on weekdays or daily. The TV titles
-        such timers "Recording"; the archived recording gets the programme's
-        title. Raises ServiceValidationError for bad input and
+        such timers "Recording" (async_refresh_timers names them from the
+        guide); the archived recording gets the programme's title. Raises ServiceValidationError for bad input and
         HomeAssistantError if the TV refuses or doesn't answer.
         """
         if not programme and start is None:
@@ -758,12 +841,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         now = time.time()
         if programme:
-            if tv_channel is not self.current_channel:
-                raise ServiceValidationError(
-                    "Only the tuned channel's programmes are known; "
-                    "give a start time to record another channel"
-                )
-            event = self.current_event if programme == "current" else self.next_event
+            if tv_channel is self.current_channel and self.current_event:
+                current, nxt = self.current_event, self.next_event
+            else:
+                current, nxt = await self._async_events_from_guide(tv_channel)
+            event = current if programme == "current" else nxt
             if event.get("start") is None or not event.get("duration"):
                 raise ServiceValidationError(f"The TV has no programme information for the {programme} programme")
             begin = event["start"]
@@ -780,10 +862,29 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if end is not None
                 else begin + int(duration.total_seconds())
             )
+            begin = max(begin, int(now))  # already under way: record the rest
         if finish <= max(begin, now):
             raise ServiceValidationError("That recording would already have ended")
 
         repeat_bits = REPEAT_DAYS.get(repeat or "", 0)
+
+        # The TV quietly accepts a timer it already has (and keeps just one), so
+        # check first and say so rather than appear to set it again
+        await self.async_refresh_timers()
+        channel_id = self._channel_key(tv_channel["locator"])
+        for timer in self.timers or []:
+            if (
+                timer.get("channel_id") == channel_id
+                and timer["start"] is not None
+                and timer["end"] is not None
+                and timer["start"] < finish
+                and timer["end"] > begin
+            ):
+                start_at = dt_util.as_local(dt_util.utc_from_timestamp(timer["start"]))
+                raise ServiceValidationError(
+                    f"Already set to record: {timer['title']} "
+                    f"({tv_channel['name']}, {start_at:%a %d %b %H:%M})"
+                )
 
         extra = (
             f"<{SOAP_PREFIX}:Device>PVR</{SOAP_PREFIX}:Device>"
@@ -795,9 +896,13 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Programming a recording on %s from %s for %s s (repeat %s)",
             tv_channel["name"], begin, finish - begin, repeat or "none",
         )
-        result = parsers.parse_result(await self._safe_request("ProgramTimer", extra_xml=extra))
-        if result is None:
+        resp = await self._safe_request("ProgramTimer", extra_xml=extra)
+        result = parsers.parse_result(resp)
+        if resp is None:
             raise HomeAssistantError("The Loewe TV didn't answer the recording request")
+        if result is None:
+            # An empty reply: the TV rejected the request without an error code
+            raise HomeAssistantError("The Loewe TV refused the recording")
         if result != 0:
             raise HomeAssistantError(f"The Loewe TV refused the recording (error {result})")
 
@@ -806,6 +911,94 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_refresh_timers()
         if self.data is not None:
             self.async_set_updated_data({**self.data, "timers": self.timers})
+
+    # ---------------------- Programme guide ----------------------
+
+    @staticmethod
+    def dvb_triplet(channel: dict[str, str]) -> Optional[tuple[int, int, int]]:
+        """(original network ID, transport stream ID, service ID) of a TV channel.
+
+        A channel's mediaItemUuid ends in them as 4 hex digits each, with
+        "ffff" between the network and transport stream IDs, e.g.
+        "chl0:00-0002233affff104410bf" -> (0x233a, 0x1044, 0x10bf).
+        """
+        uuid = channel.get("uuid") or ""
+        digits = uuid.rsplit("-", 1)[-1]
+        if not uuid.startswith("chl") or len(digits) < 16:
+            return None
+        try:
+            return int(digits[-16:-12], 16), int(digits[-8:-4], 16), int(digits[-4:], 16)
+        except ValueError:
+            return None
+
+    async def async_get_guide(
+        self, channel: dict[str, str], *, include_ended: bool = False
+    ) -> list[dict[str, Any]]:
+        """Programmes on a channel from the one on now to the end of the TV's guide (about a week);
+        with include_ended, also those that ended in the last GUIDE_PAST_SECONDS.
+
+        Read from the TV's own EPG table with an iterator; cached for GUIDE_CACHE_SECONDS.
+        Raises HomeAssistantError if the channel has no DVB IDs or the TV doesn't answer.
+        """
+        key = self._channel_key(channel["locator"])
+        now = time.time()
+        cached = self._guides.get(key)
+        if cached and now - cached[0] < GUIDE_CACHE_SECONDS:
+            return cached[1] if include_ended else [p for p in cached[1] if p["end"] > now]
+
+        triplet = self.dvb_triplet(channel)
+        if not triplet:
+            raise HomeAssistantError(f"No guide available for {channel['name']}")
+        onid, tsid, sid = triplet
+
+        def selection(field: int, condition: int, value: int) -> str:
+            return (
+                f"<{SOAP_PREFIX}:Selection><{SOAP_PREFIX}:Field>{field}</{SOAP_PREFIX}:Field>"
+                f"<{SOAP_PREFIX}:Condition>{condition}</{SOAP_PREFIX}:Condition>"
+                f"<{SOAP_PREFIX}:Value>{value}</{SOAP_PREFIX}:Value></{SOAP_PREFIX}:Selection>"
+            )
+
+        fields = "".join(f"<{SOAP_PREFIX}:Field>{f}</{SOAP_PREFIX}:Field>" for f in parsers.EPG_FIELDS)
+        # Condition 1 is "equals"; seeking to the first programme whose end
+        # (2008) is after a time (condition 5) starts the list there.
+        extra = (
+            f"<{SOAP_PREFIX}:TableName>de.loewe.sl2.epg</{SOAP_PREFIX}:TableName>"
+            f"<{SOAP_PREFIX}:Type>0</{SOAP_PREFIX}:Type>"
+            f"<{SOAP_PREFIX}:Selections>{selection(2002, 1, onid)}{selection(2000, 1, sid)}"
+            f"{selection(2001, 1, tsid)}</{SOAP_PREFIX}:Selections>"
+            f"<{SOAP_PREFIX}:Fields>{fields}</{SOAP_PREFIX}:Fields>"
+            f"<{SOAP_PREFIX}:Orders><{SOAP_PREFIX}:Order><{SOAP_PREFIX}:Field>2007</{SOAP_PREFIX}:Field>"
+            f"<{SOAP_PREFIX}:Direction>1</{SOAP_PREFIX}:Direction></{SOAP_PREFIX}:Order></{SOAP_PREFIX}:Orders>"
+            f"<{SOAP_PREFIX}:NotifyUpdate>NO</{SOAP_PREFIX}:NotifyUpdate>"
+            f'<{SOAP_PREFIX}:QueryParameters><{SOAP_PREFIX}:Range startIndex="0" maxItems="{GUIDE_MAX_PROGRAMMES}"/>'
+            f"</{SOAP_PREFIX}:QueryParameters>"
+            f"<{SOAP_PREFIX}:SeekToContentParameters><{SOAP_PREFIX}:Selections>{selection(2008, 5, int(now) - GUIDE_PAST_SECONDS)}"
+            f"</{SOAP_PREFIX}:Selections><{SOAP_PREFIX}:Which>0</{SOAP_PREFIX}:Which>"
+            f"<{SOAP_PREFIX}:Offset>0</{SOAP_PREFIX}:Offset><{SOAP_PREFIX}:WindowSize>0</{SOAP_PREFIX}:WindowSize>"
+            f"</{SOAP_PREFIX}:SeekToContentParameters>"
+        )
+        programmes = parsers.parse_guide(await self._safe_request("CreateIterator", extra_xml=extra))
+        if programmes is None:
+            raise HomeAssistantError(f"The Loewe TV didn't send the guide for {channel['name']}")
+        programmes = [{**p, "channel_id": key} for p in programmes if p["end"] > now - GUIDE_PAST_SECONDS]
+        self._guides[key] = (now, programmes)
+        _LOGGER.debug("Guide for %s: %d programmes", channel["name"], len(programmes))
+        return programmes if include_ended else [p for p in programmes if p["end"] > now]
+
+
+    # ---------------------- Recordings archive ----------------------
+
+    async def async_get_recordings(self) -> list[dict[str, Any]]:
+        """The DR+ recorder's recordings, newest first. Raises HomeAssistantError if no answer."""
+        extra = (
+            f"<{SOAP_PREFIX}:QueryParameters>"
+            f'<{SOAP_PREFIX}:Range startIndex="0" maxItems="1000"/>'
+            f"</{SOAP_PREFIX}:QueryParameters>"
+        )
+        recordings = parsers.parse_recordings(await self._safe_request("GetDRPlusArchive", extra_xml=extra))
+        if recordings is None:
+            raise HomeAssistantError("The Loewe TV didn't send its recordings")
+        return recordings
 
 
 def _local_datetime(value: datetime) -> datetime:

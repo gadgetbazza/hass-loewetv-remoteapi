@@ -1,9 +1,12 @@
 """Media Player platform for Loewe TV."""
 
 from __future__ import annotations
+import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+import aiohttp
 
 from homeassistant.components.media_player import (
     BrowseError,
@@ -17,8 +20,12 @@ from homeassistant.components.media_player import (
 from homeassistant.const import STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
+from homeassistant.util import slugify
 
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
@@ -28,11 +35,24 @@ _LOGGER = logging.getLogger(__name__)
 BROWSE_FAVOURITES = "favourites"
 BROWSE_ALL_CHANNELS = "all_channels"
 BROWSE_INPUTS = "inputs"
+BROWSE_GUIDE = "guide"
+BROWSE_RECORDINGS = "recordings"
 BROWSE_FOLDERS = {
     BROWSE_FAVOURITES: "Favourites",
     BROWSE_ALL_CHANNELS: "All channels",
     BROWSE_INPUTS: "Inputs",
+    BROWSE_GUIDE: "Guide",
+    BROWSE_RECORDINGS: "Recordings",
 }
+# Recordings are played by their archive locator
+RECORDING_LOCATOR = "drplus://"
+
+# Media IDs below the Guide folder: guide/<channel key>[/<YYYY-MM-DD>[/<start>]],
+# and the "Record" items, played to programme a recording:
+# record/<channel key>/<start>/<end>
+GUIDE_PREFIX = f"{BROWSE_GUIDE}/"
+RECORD_PREFIX = "record/"
+MEDIA_TYPE_RECORD = "loewe_record"
 
 
 async def async_setup_entry(
@@ -62,6 +82,11 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_media"
         self._attr_device_info = coordinator.device_info
+        # Recording locator -> thumbnail URL (TMDB's, else the TV's), from the last Recordings listing
+        self._recording_images: dict[str, str] = {}
+        self._recording_titles: dict[str, str] = {}
+        # Recordings whose TV thumbnail exists: the TV makes one on first playback, and keeps it
+        self._tv_thumbnails: set[str] = set()
 
     # ---------- State ----------
     @property
@@ -132,11 +157,15 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             return None
         if self._channel:
             return self._event.get("name") or self._channel["name"]
+        if self.coordinator.playback_mode == "drplus" and self.coordinator.recording_title:
+            return self.coordinator.recording_title
         return self.coordinator.current_source_name
 
     @property
     def media_image_url(self) -> str | None:
         """Programme artwork from TMDB (only when an API key is set in the options)."""
+        if self.coordinator.playback_mode == "drplus":
+            return self.coordinator.recording_artwork
         return (self.coordinator.data or {}).get("artwork") if self._channel else None
 
     @property
@@ -189,6 +218,12 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
                 children=[self._browse_folder(folder) for folder in BROWSE_FOLDERS],
                 children_media_class=MediaClass.DIRECTORY,
             )
+        if media_content_id == BROWSE_GUIDE:
+            return self._browse_guide_channels()
+        if media_content_id == BROWSE_RECORDINGS:
+            return await self._async_browse_recordings()
+        if media_content_id.startswith(GUIDE_PREFIX):
+            return await self._async_browse_guide(media_content_id[len(GUIDE_PREFIX):].split("/"))
         if media_content_id in BROWSE_FOLDERS:
             return self._browse_folder(media_content_id, with_children=True)
         raise BrowseError(f"Unknown media folder: {media_content_id}")
@@ -201,6 +236,9 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         return self.coordinator.available_sources
 
     def _browse_folder(self, folder: str, with_children: bool = False) -> BrowseMedia:
+        if folder in (BROWSE_GUIDE, BROWSE_RECORDINGS) and not with_children:
+            children_class = MediaClass.CHANNEL if folder == BROWSE_GUIDE else MediaClass.EPISODE
+            return _directory(folder, BROWSE_FOLDERS[folder], children_class)
         children = None
         if with_children:
             children = [
@@ -225,14 +263,263 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             children_media_class=MediaClass.CHANNEL,
         )
 
+    # ---------- Programme guide ----------
+    @staticmethod
+    def _channel_title(channel: dict[str, str]) -> str:
+        return f"{channel['number']}. {channel['name']}" if channel.get("number") else channel["name"]
+
+    def _guide_channels(self) -> list[dict[str, str]]:
+        """Channels offered in the guide: the favourites, or every channel if there are none."""
+        channels = self.coordinator.favourite_channels or self.coordinator.all_channels
+        return [c for c in channels if self.coordinator.dvb_triplet(c)]
+
+    def _browse_guide_channels(self) -> BrowseMedia:
+        children = [
+            _directory(
+                f"{GUIDE_PREFIX}{self.coordinator.channel_key(channel)}",
+                self._channel_title(channel),
+                MediaClass.DIRECTORY,
+                media_class=MediaClass.CHANNEL,
+            )
+            for channel in self._guide_channels()
+        ]
+        return _directory(BROWSE_GUIDE, BROWSE_FOLDERS[BROWSE_GUIDE], MediaClass.CHANNEL, children)
+
+    async def _async_browse_guide(self, parts: list[str]) -> BrowseMedia:
+        """Guide pages: a channel's days, a day's programmes, or one programme's actions."""
+        channel = self.coordinator.channel_by_key(parts[0])
+        if not channel:
+            raise BrowseError(f"Unknown channel in the guide: {parts[0]}")
+        programmes = await self.coordinator.async_get_guide(channel)
+        base = f"{GUIDE_PREFIX}{parts[0]}"
+        today = dt_util.now().date()
+
+        if len(parts) == 1:
+            days = sorted({_local_date(p["start"], today) for p in programmes})
+            children = [
+                _directory(f"{base}/{day.isoformat()}", _day_title(day, today), MediaClass.EPISODE)
+                for day in days
+            ]
+            return _directory(base, self._channel_title(channel), MediaClass.DIRECTORY, children)
+
+        try:
+            day = date.fromisoformat(parts[1])
+        except ValueError as err:
+            raise BrowseError(f"Bad guide date: {parts[1]}") from err
+        on_day = [p for p in programmes if _local_date(p["start"], today) == day]
+        day_id = f"{base}/{parts[1]}"
+
+        if len(parts) == 2:
+            children = [
+                _directory(
+                    f"{day_id}/{p['start']}",
+                    self._programme_title(p),
+                    MediaClass.DIRECTORY,
+                    media_class=MediaClass.EPISODE,
+                )
+                for p in on_day
+            ]
+            title = f"{self._channel_title(channel)}: {_day_title(day, today)}"
+            return _directory(day_id, title, MediaClass.EPISODE, children)
+
+        programme = next((p for p in on_day if str(p["start"]) == parts[2]), None)
+        if not programme:
+            raise BrowseError("That programme is no longer in the guide")
+        return self._browse_programme(channel, parts[0], programme, f"{day_id}/{parts[2]}")
+
+    def _programme_title(self, programme: dict[str, Any]) -> str:
+        start = dt_util.as_local(dt_util.utc_from_timestamp(programme["start"]))
+        title = f"{start:%H:%M} {programme['title']}"
+        if programme["start"] <= dt_util.utcnow().timestamp():
+            title += " (on now)"
+        if self._is_scheduled(programme):
+            title += " ●"
+        return title
+
+    def _is_scheduled(self, programme: dict[str, Any]) -> bool:
+        """True if a recording timer overlaps this programme on its channel."""
+        return any(
+            timer["start"] is not None
+            and timer["end"] is not None
+            and timer["start"] < programme["end"]
+            and timer["end"] > programme["start"]
+            and timer.get("channel_id") == programme.get("channel_id")
+            for timer in self.coordinator.timers or []
+        )
+
+    def _browse_programme(
+        self, channel: dict[str, str], key: str, programme: dict[str, Any], media_id: str
+    ) -> BrowseMedia:
+        """A programme's page: Watch (while it's on) and Record."""
+        children = []
+        if programme["start"] <= dt_util.utcnow().timestamp():
+            children.append(BrowseMedia(
+                title=f"Watch {channel['name']}",
+                media_class=MediaClass.CHANNEL,
+                media_content_id=channel["locator"],
+                media_content_type=MediaType.CHANNEL,
+                can_play=True,
+                can_expand=False,
+            ))
+        record_id = f"{RECORD_PREFIX}{key}/{programme['start']}/{programme['end']}"
+        children.append(BrowseMedia(
+            title="Scheduled to record ●" if self._is_scheduled(programme) else "Record",
+            media_class=MediaClass.EPISODE,
+            media_content_id=record_id,
+            media_content_type=MEDIA_TYPE_RECORD,
+            can_play=True,
+            can_expand=False,
+        ))
+        if programme.get("description"):
+            # The browser has no text field; a non-playable item shows the description
+            children.append(BrowseMedia(
+                title=programme["description"],
+                media_class=MediaClass.DIRECTORY,
+                media_content_id=f"{media_id}/info",
+                media_content_type="",
+                can_play=False,
+                can_expand=False,
+            ))
+        return _directory(media_id, self._programme_title(programme), MediaClass.EPISODE, children)
+
+    async def _async_record_from_guide(self, media_id: str) -> None:
+        try:
+            key, start, end = media_id[len(RECORD_PREFIX):].split("/")
+            begin, finish = int(start), int(end)
+        except ValueError as err:
+            raise HomeAssistantError(f"Bad recording request: {media_id}") from err
+        channel = self.coordinator.channel_by_key(key)
+        if not channel:
+            raise HomeAssistantError(f"Unknown channel: {key}")
+        await self.coordinator.async_record(
+            channel=channel["locator"],
+            start=dt_util.utc_from_timestamp(begin),
+            end=dt_util.utc_from_timestamp(finish),
+        )
+        # The media panel gives no feedback (and shows its cached page, without
+        # the ●, on Back), so confirm on the phone of the person who asked
+        programmes = await self.coordinator.async_get_guide(channel)
+        title = next((p["title"] for p in programmes if p["start"] == begin), "Recording")
+        start_at = dt_util.as_local(dt_util.utc_from_timestamp(begin))
+        end_at = dt_util.as_local(dt_util.utc_from_timestamp(finish))
+        tv = state.name if (state := self.hass.states.get(self.entity_id)) else "Loewe TV"
+        await self._async_notify_requester(
+            f"{tv}: recording set",
+            f"{title}, {channel['name']}, {start_at:%a %d %b %H:%M}–{end_at:%H:%M}",
+        )
+
+    async def _async_notify_requester(self, title: str, message: str) -> None:
+        """Push a message to the phone(s) the requesting user's person tracks with the
+        companion app. Nothing is sent for automations or users without one."""
+        user_id = self._context.user_id if self._context else None
+        if not user_id:
+            return
+        registry = er.async_get(self.hass)
+        services = set()
+        for person in self.hass.states.async_all("person"):
+            if person.attributes.get("user_id") != user_id:
+                continue
+            for tracker in person.attributes.get("device_trackers", []):
+                entry = registry.async_get(tracker)
+                if not entry or entry.platform != "mobile_app" or not entry.config_entry_id:
+                    continue
+                app = self.hass.config_entries.async_get_entry(entry.config_entry_id)
+                if app and (name := app.data.get("device_name")):
+                    services.add(f"mobile_app_{slugify(name)}")
+        for service in services:
+            if self.hass.services.has_service("notify", service):
+                await self.hass.services.async_call(
+                    "notify", service, {"title": title, "message": message}, blocking=False
+                )
+        if not services:
+            _LOGGER.debug("No companion app phone found for user %s; recording not confirmed", user_id)
+
+    # ---------- Recordings ----------
+    async def _async_browse_recordings(self) -> BrowseMedia:
+        children = []
+        recordings = await self.coordinator.async_get_recordings()
+        # Thumbnails go through HA's image proxy (async_get_browse_image), so
+        # they also load when HA is used from outside the TV's network
+        images = await asyncio.gather(*(self._async_recording_image(rec) for rec in recordings))
+        self._recording_images = {
+            rec["locator"]: image for rec, image in zip(recordings, images) if image
+        }
+        self._recording_titles = {rec["locator"]: rec["title"] for rec in recordings}
+        for rec in recordings:
+            details = [rec["channel"]]
+            if rec["start"] is not None:
+                details.append(f"{dt_util.as_local(dt_util.utc_from_timestamp(rec['start'])):%a %d %b %H:%M}")
+            if rec["duration"]:
+                details.append(f"{round(rec['duration'] / 60)} min")
+            title = rec["title"]
+            children.append(BrowseMedia(
+                title=f"{title} ({', '.join(d for d in details if d)})",
+                media_class=MediaClass.EPISODE,
+                media_content_id=rec["locator"],
+                media_content_type=MediaType.EPISODE,
+                can_play=True,
+                can_expand=False,
+                thumbnail=(
+                    self.get_browse_image_url(MediaType.EPISODE, rec["locator"])
+                    if rec["locator"] in self._recording_images
+                    else None
+                ),
+            ))
+        return _directory(BROWSE_RECORDINGS, BROWSE_FOLDERS[BROWSE_RECORDINGS], MediaClass.EPISODE, children)
+
+    async def _async_recording_image(self, rec: dict[str, Any]) -> str | None:
+        """TMDB artwork for the title (if set up), else the TV's thumbnail if it has made one.
+
+        The TV's thumbnail is a frame from the start of the recording (often an
+        ident or black), made only on first playback, so TMDB's is preferred.
+        """
+        tmdb = self.coordinator.tmdb
+        if tmdb and (artwork := await tmdb.async_lookup(rec["title"])):
+            return artwork
+        locator, url = rec["locator"], rec["image"]
+        if url and locator not in self._tv_thumbnails:
+            try:
+                async with async_get_clientsession(self.hass).get(
+                    url, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        self._tv_thumbnails.add(locator)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+        return url if url and locator in self._tv_thumbnails else None
+
+    async def async_get_browse_image(
+        self,
+        media_content_type: str,
+        media_content_id: str,
+        media_image_id: str | None = None,
+    ) -> tuple[bytes | None, str | None]:
+        """Fetch a recording's thumbnail (from the TV or TMDB) for HA's media proxy."""
+        url = self._recording_images.get(media_content_id)
+        if not url:
+            return None, None
+        return await self._async_fetch_image(url)
+
     async def async_play_media(self, media_type: str, media_id: str, **kwargs: Any) -> None:
-        """Switch to a channel/input given its locator, name or favourite number."""
+        """Switch to a channel/input given its locator, name or favourite number,
+        or programme a recording picked in the guide."""
+        if media_id.startswith(RECORD_PREFIX):
+            await self._async_record_from_guide(media_id)
+            return
+        if media_id.startswith(GUIDE_PREFIX):
+            # The programme description item: the media panel "plays" any item
+            # that can't be opened, so a tap on it is ignored
+            return
         item = self.coordinator.find_channel(media_id)
         locator = item["locator"] if item else media_id
-        if not item and not media_id.startswith("channel://"):
+        if not item and not media_id.startswith(("channel://", RECORDING_LOCATOR)):
             raise HomeAssistantError(f"Unknown Loewe channel or input: {media_id}")
         if not await self.coordinator.async_set_channel(locator):
             raise HomeAssistantError(f"Loewe TV did not switch to {media_id}")
+        if locator.startswith(RECORDING_LOCATOR):
+            # The TV reports only "a recording" while it plays; remember which
+            self.coordinator.recording_title = self._recording_titles.get(locator)
+            self.coordinator.recording_artwork = self._recording_images.get(locator)
 
     # ---------- Commands ----------
     def _set_optimistic(self, **device_changes: Any) -> None:
@@ -285,3 +572,36 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             self.async_write_ha_state()
         else:
             _LOGGER.warning("Switching to %s (%s) failed", source, locator)
+
+
+def _directory(
+    media_id: str,
+    title: str,
+    children_class: MediaClass,
+    children: list[BrowseMedia] | None = None,
+    media_class: MediaClass = MediaClass.DIRECTORY,
+) -> BrowseMedia:
+    return BrowseMedia(
+        title=title,
+        media_class=media_class,
+        media_content_id=media_id,
+        media_content_type="",
+        can_play=False,
+        can_expand=True,
+        children=children,
+        children_media_class=children_class,
+    )
+
+
+def _local_date(timestamp: int, today: date) -> date:
+    """The local date a programme starts on (one on now that began yesterday counts as today)."""
+    return max(dt_util.as_local(dt_util.utc_from_timestamp(timestamp)).date(), today)
+
+
+def _day_title(day: date, today: date) -> str:
+    if day == today:
+        return "Today"
+    if day == today + timedelta(days=1):
+        return "Tomorrow"
+    return f"{day:%A} {day.day} {day:%B}"
+
