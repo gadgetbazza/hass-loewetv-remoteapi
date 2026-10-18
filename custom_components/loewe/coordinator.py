@@ -95,6 +95,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.available_sources: list[dict[str, str]] = []
         self.current_locator: Optional[str] = None
         self.last_tv_locator: Optional[str] = None
+        # GetCurrentPlayback's Mode ("drplus" while a recording plays), and the
+        # recording's title/artwork when HA started it (the TV doesn't say which)
+        self.playback_mode: Optional[str] = None
+        self.recording_title: Optional[str] = None
+        self.recording_artwork: Optional[str] = None
         self._device_info: dict[str, Any] = {}
         self.device_name: Optional[str] = None
         self._reachable = True
@@ -207,13 +212,17 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         volume = parsers.parse_volume(volume_resp)
         mute = parsers.parse_mute(mute_resp)
 
-        # Remember last TV channel locator if current playback is not an AV source
+        # Remember the last TV channel (not an AV input, nor a recording, whose
+        # locator reads "[DR+ URI]" while it plays)
         if playback and (locator := playback.get("Locator")):
-            av_locators = {s["locator"] for s in self.available_sources if "locator" in s}
-            if locator not in av_locators:
+            if locator.startswith("channel://") and not self._is_av_locator(locator):
                 if locator != self.last_tv_locator:
                     _LOGGER.debug("Updating last TV locator to %s", locator)
                     self.last_tv_locator = locator
+        if playback:
+            self.playback_mode = playback.get("Mode")
+            if self.playback_mode != "drplus":
+                self.recording_title = self.recording_artwork = None
 
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
@@ -340,7 +349,9 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def current_source_name(self) -> Optional[str]:
-        """Name of the active input: an AV source name, "TV", or None if unknown."""
+        """Name of the active input: an AV source name, "TV", "Recording", or None if unknown."""
+        if self.playback_mode == "drplus":
+            return "Recording"
         loc = self.current_locator
         if not loc:
             return None

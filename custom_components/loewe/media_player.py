@@ -84,6 +84,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         self._attr_device_info = coordinator.device_info
         # Recording locator -> thumbnail URL (TMDB's, else the TV's), from the last Recordings listing
         self._recording_images: dict[str, str] = {}
+        self._recording_titles: dict[str, str] = {}
         # Recordings whose TV thumbnail exists: the TV makes one on first playback, and keeps it
         self._tv_thumbnails: set[str] = set()
 
@@ -156,11 +157,15 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             return None
         if self._channel:
             return self._event.get("name") or self._channel["name"]
+        if self.coordinator.playback_mode == "drplus" and self.coordinator.recording_title:
+            return self.coordinator.recording_title
         return self.coordinator.current_source_name
 
     @property
     def media_image_url(self) -> str | None:
         """Programme artwork from TMDB (only when an API key is set in the options)."""
+        if self.coordinator.playback_mode == "drplus":
+            return self.coordinator.recording_artwork
         return (self.coordinator.data or {}).get("artwork") if self._channel else None
 
     @property
@@ -439,6 +444,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         self._recording_images = {
             rec["locator"]: image for rec, image in zip(recordings, images) if image
         }
+        self._recording_titles = {rec["locator"]: rec["title"] for rec in recordings}
         for rec in recordings:
             details = [rec["channel"]]
             if rec["start"] is not None:
@@ -510,6 +516,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             raise HomeAssistantError(f"Unknown Loewe channel or input: {media_id}")
         if not await self.coordinator.async_set_channel(locator):
             raise HomeAssistantError(f"Loewe TV did not switch to {media_id}")
+        if locator.startswith(RECORDING_LOCATOR):
+            # The TV reports only "a recording" while it plays; remember which
+            self.coordinator.recording_title = self._recording_titles.get(locator)
+            self.coordinator.recording_artwork = self._recording_images.get(locator)
 
     # ---------- Commands ----------
     def _set_optimistic(self, **device_changes: Any) -> None:
