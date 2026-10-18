@@ -824,6 +824,24 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         repeat_bits = REPEAT_DAYS.get(repeat or "", 0)
 
+        # The TV quietly accepts a timer it already has (and keeps just one), so
+        # check first and say so rather than appear to set it again
+        await self.async_refresh_timers()
+        channel_id = self._channel_key(tv_channel["locator"])
+        for timer in self.timers or []:
+            if (
+                timer.get("channel_id") == channel_id
+                and timer["start"] is not None
+                and timer["end"] is not None
+                and timer["start"] < finish
+                and timer["end"] > begin
+            ):
+                start_at = dt_util.as_local(dt_util.utc_from_timestamp(timer["start"]))
+                raise ServiceValidationError(
+                    f"Already set to record: {timer['title']} "
+                    f"({tv_channel['name']}, {start_at:%a %d %b %H:%M})"
+                )
+
         extra = (
             f"<{SOAP_PREFIX}:Device>PVR</{SOAP_PREFIX}:Device>"
             f"<{SOAP_PREFIX}:RecordingType>default</{SOAP_PREFIX}:RecordingType>"
