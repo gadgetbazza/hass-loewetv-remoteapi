@@ -45,7 +45,7 @@ data:
 ### Buttons
 - Optional button entities (disabled by default) for:
   - Volume Up / Down, Mute, Channel Up / Down
-  - Menu, Back, Info, Home, arrow keys
+  - Menu, Back, Info, Home, arrow keys, OK
   - Red / Green / Yellow / Blue keys
 
 ### Sensors
