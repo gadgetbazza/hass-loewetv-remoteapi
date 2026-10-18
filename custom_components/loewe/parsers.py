@@ -299,6 +299,7 @@ def full_title(title: str, subtitle: str | None) -> str:
 # GetTimerList Attributes bits (API spec 9.13.1)
 TIMER_ATTR_RECORDING = 0x80
 TIMER_ATTR_CONFLICT = 0x20
+TIMER_ATTR_SERIES = 0x2000  # an episode timer created by a series recording
 
 
 def parse_timer_list(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:

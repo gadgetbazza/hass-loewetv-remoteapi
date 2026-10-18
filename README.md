@@ -53,7 +53,7 @@ data:
 ### Sensors
 - **Current Service**: the channel name, or the input name (e.g. HDMI 1)
 - **Current Programme**: the programme on the current channel, with start/end times, description and next programme as attributes
-- **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, repeat, whether it is recording now or in conflict), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
+- **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, `repeat` (`weekdays`, `daily`, `weekly` or `series`), whether it is recording now or in conflict, and `series_episode` for the episode timers a series recording creates), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
 
 ### Binary sensors
 - **Recording**: on while the TV's DR+ recorder is recording, with the recording's `title` and `channel` as attributes

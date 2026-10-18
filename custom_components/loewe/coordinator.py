@@ -834,9 +834,13 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Programming a recording on %s from %s for %s s (repeat %s)",
             tv_channel["name"], begin, finish - begin, repeat or "none",
         )
-        result = parsers.parse_result(await self._safe_request("ProgramTimer", extra_xml=extra))
-        if result is None:
+        resp = await self._safe_request("ProgramTimer", extra_xml=extra)
+        result = parsers.parse_result(resp)
+        if resp is None:
             raise HomeAssistantError("The Loewe TV didn't answer the recording request")
+        if result is None:
+            # An empty reply: the TV rejected the request without an error code
+            raise HomeAssistantError("The Loewe TV refused the recording")
         if result != 0:
             raise HomeAssistantError(f"The Loewe TV refused the recording (error {result})")
 
