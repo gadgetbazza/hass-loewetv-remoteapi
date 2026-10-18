@@ -1,7 +1,10 @@
 """Media Player platform for Loewe TV."""
 
 from __future__ import annotations
+import asyncio
 import logging
+
+import aiohttp
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -17,6 +20,7 @@ from homeassistant.components.media_player import (
 from homeassistant.const import STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -78,8 +82,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_media"
         self._attr_device_info = coordinator.device_info
-        # Recording locator -> the TV's thumbnail URL, from the last Recordings listing
+        # Recording locator -> thumbnail URL (the TV's, else TMDB's), from the last Recordings listing
         self._recording_images: dict[str, str] = {}
+        # Recordings whose TV thumbnail exists: the TV makes one on first playback, and keeps it
+        self._tv_thumbnails: set[str] = set()
 
     # ---------- State ----------
     @property
@@ -429,7 +435,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         recordings = await self.coordinator.async_get_recordings()
         # Thumbnails go through HA's image proxy (async_get_browse_image), so
         # they also load when HA is used from outside the TV's network
-        self._recording_images = {rec["locator"]: rec["image"] for rec in recordings if rec["image"]}
+        images = await asyncio.gather(*(self._async_recording_image(rec) for rec in recordings))
+        self._recording_images = {
+            rec["locator"]: image for rec, image in zip(recordings, images) if image
+        }
         for rec in recordings:
             details = [rec["channel"]]
             if rec["start"] is not None:
@@ -445,10 +454,29 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
                 can_play=True,
                 can_expand=False,
                 thumbnail=(
-                    self.get_browse_image_url(MediaType.EPISODE, rec["locator"]) if rec["image"] else None
+                    self.get_browse_image_url(MediaType.EPISODE, rec["locator"])
+                    if rec["locator"] in self._recording_images
+                    else None
                 ),
             ))
         return _directory(BROWSE_RECORDINGS, BROWSE_FOLDERS[BROWSE_RECORDINGS], MediaClass.EPISODE, children)
+
+    async def _async_recording_image(self, rec: dict[str, Any]) -> str | None:
+        """The TV's thumbnail if it has made one, else TMDB artwork for the title (if set up)."""
+        locator, url = rec["locator"], rec["image"]
+        if url and locator not in self._tv_thumbnails:
+            try:
+                async with async_get_clientsession(self.hass).get(
+                    url, timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status == 200:
+                        self._tv_thumbnails.add(locator)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                pass
+        if url and locator in self._tv_thumbnails:
+            return url
+        tmdb = self.coordinator.tmdb
+        return await tmdb.async_lookup(rec["title"]) if tmdb else None
 
     async def async_get_browse_image(
         self,
@@ -456,7 +484,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         media_content_id: str,
         media_image_id: str | None = None,
     ) -> tuple[bytes | None, str | None]:
-        """Fetch a recording's thumbnail from the TV for HA's media proxy."""
+        """Fetch a recording's thumbnail (from the TV or TMDB) for HA's media proxy."""
         url = self._recording_images.get(media_content_id)
         if not url:
             return None, None
