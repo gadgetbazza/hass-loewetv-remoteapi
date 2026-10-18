@@ -135,6 +135,7 @@ card_mod:
       --ha-card-background: transparent; --ha-card-border-width: 0; --ha-card-box-shadow: none;
       {% if pic %}
       --primary-text-color: #fff; --secondary-text-color: #eee; --paper-item-icon-color: #eee;
+      --pad-color: #fff; --pad-ring: rgba(255,255,255,.35); --pad-centre: rgba(255,255,255,.25);
       text-shadow: 0 1px 3px rgba(0,0,0,.9);
       {% endif %} }
     {% if pic %}
@@ -166,11 +167,13 @@ card:
           down: {icon: mdi:chevron-down, tap_action: {action: key, key: down}, hold_action: {action: repeat}}
           left: {icon: mdi:chevron-left, tap_action: {action: key, key: left}, hold_action: {action: repeat}}
           right: {icon: mdi:chevron-right, tap_action: {action: key, key: right}, hold_action: {action: repeat}}
-          # see-through d-pad so the artwork shows behind it
+          # see-through d-pad so the artwork shows behind it: white over artwork,
+          # the theme's colours (readable in light and dark mode) without
           styles: |
-            :host(remote-circlepad) { width: 250px; --icon-size: min(48px, 12vw); --icon-color: #fff; }
-            .circlepad { background: transparent; outline: 2px solid rgba(255,255,255,.35); }
-            #center::part(button) { background: rgba(255,255,255,.25); outline: none; }
+            :host(remote-circlepad) { width: 250px; --icon-size: min(48px, 12vw);
+              --icon-color: var(--pad-color, var(--primary-text-color)); }
+            .circlepad { background: transparent; outline: 2px solid var(--pad-ring, var(--divider-color)); }
+            #center::part(button) { background: var(--pad-centre, var(--secondary-background-color)); outline: none; }
         - {type: button, name: back, icon: mdi:keyboard-backspace, tap_action: {action: key, key: end}}
         - {type: button, name: home, icon: mdi:home, tap_action: {action: key, key: media}}
         - {type: button, name: menu, icon: mdi:menu, tap_action: {action: key, key: menu}}
