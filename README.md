@@ -53,6 +53,9 @@ data:
 - **Current Programme**: the programme on the current channel, with start/end times, description and next programme as attributes
 - **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, repeat, whether it is recording now or in conflict), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
 
+### Binary sensors
+- **Recording**: on while the TV's DR+ recorder is recording, with the recording's `title` and `channel` as attributes
+
 ### Services
 - `loewe.refresh_sources`: re-read the AV inputs and channel lists from the TV (e.g. after a channel scan or renaming an input). Channels and inputs are otherwise loaded once at startup.
 - `loewe.channel_up` / `loewe.channel_down`: step through the TV's channels.
