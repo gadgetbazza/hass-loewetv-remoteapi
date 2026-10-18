@@ -58,6 +58,9 @@ TIMERS_EDGE_DELAY = 30
 
 # A channel's guide (a week of programmes) is read in one request and kept this long
 GUIDE_CACHE_SECONDS = 600
+# ...from this long ago, so a timer still in the TV's post-recording margin
+# can be named after a programme that has just ended
+GUIDE_PAST_SECONDS = 3 * 3600
 GUIDE_MAX_PROGRAMMES = 1000
 
 # ProgramTimer's repeatDays is documented as a weekday bitmask, but the TV
@@ -748,7 +751,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not channel:
                 continue
             try:
-                programmes = await self.async_get_guide(channel)
+                programmes = await self.async_get_guide(channel, include_ended=True)
             except HomeAssistantError:
                 continue
 
@@ -887,8 +890,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except ValueError:
             return None
 
-    async def async_get_guide(self, channel: dict[str, str]) -> list[dict[str, Any]]:
-        """Programmes on a channel from the one on now to the end of the TV's guide (about a week).
+    async def async_get_guide(
+        self, channel: dict[str, str], *, include_ended: bool = False
+    ) -> list[dict[str, Any]]:
+        """Programmes on a channel from the one on now to the end of the TV's guide (about a week);
+        with include_ended, also those that ended in the last GUIDE_PAST_SECONDS.
 
         Read from the TV's own EPG table with an iterator; cached for GUIDE_CACHE_SECONDS.
         Raises HomeAssistantError if the channel has no DVB IDs or the TV doesn't answer.
@@ -897,7 +903,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = time.time()
         cached = self._guides.get(key)
         if cached and now - cached[0] < GUIDE_CACHE_SECONDS:
-            return [p for p in cached[1] if p["end"] > now]
+            return cached[1] if include_ended else [p for p in cached[1] if p["end"] > now]
 
         triplet = self.dvb_triplet(channel)
         if not triplet:
@@ -913,7 +919,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         fields = "".join(f"<{SOAP_PREFIX}:Field>{f}</{SOAP_PREFIX}:Field>" for f in parsers.EPG_FIELDS)
         # Condition 1 is "equals"; seeking to the first programme whose end
-        # (2008) is after now (condition 5) starts the list at the one on now.
+        # (2008) is after a time (condition 5) starts the list there.
         extra = (
             f"<{SOAP_PREFIX}:TableName>de.loewe.sl2.epg</{SOAP_PREFIX}:TableName>"
             f"<{SOAP_PREFIX}:Type>0</{SOAP_PREFIX}:Type>"
@@ -925,7 +931,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"<{SOAP_PREFIX}:NotifyUpdate>NO</{SOAP_PREFIX}:NotifyUpdate>"
             f'<{SOAP_PREFIX}:QueryParameters><{SOAP_PREFIX}:Range startIndex="0" maxItems="{GUIDE_MAX_PROGRAMMES}"/>'
             f"</{SOAP_PREFIX}:QueryParameters>"
-            f"<{SOAP_PREFIX}:SeekToContentParameters><{SOAP_PREFIX}:Selections>{selection(2008, 5, int(now))}"
+            f"<{SOAP_PREFIX}:SeekToContentParameters><{SOAP_PREFIX}:Selections>{selection(2008, 5, int(now) - GUIDE_PAST_SECONDS)}"
             f"</{SOAP_PREFIX}:Selections><{SOAP_PREFIX}:Which>0</{SOAP_PREFIX}:Which>"
             f"<{SOAP_PREFIX}:Offset>0</{SOAP_PREFIX}:Offset><{SOAP_PREFIX}:WindowSize>0</{SOAP_PREFIX}:WindowSize>"
             f"</{SOAP_PREFIX}:SeekToContentParameters>"
@@ -933,10 +939,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         programmes = parsers.parse_guide(await self._safe_request("CreateIterator", extra_xml=extra))
         if programmes is None:
             raise HomeAssistantError(f"The Loewe TV didn't send the guide for {channel['name']}")
-        programmes = [{**p, "channel_id": key} for p in programmes if p["end"] > now]
+        programmes = [{**p, "channel_id": key} for p in programmes if p["end"] > now - GUIDE_PAST_SECONDS]
         self._guides[key] = (now, programmes)
         _LOGGER.debug("Guide for %s: %d programmes", channel["name"], len(programmes))
-        return programmes
+        return programmes if include_ended else [p for p in programmes if p["end"] > now]
 
 
     # ---------------------- Recordings archive ----------------------
