@@ -102,6 +102,7 @@ def rc_code(name: str) -> int | None:
 
 # Platforms supported by this integration
 PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
     Platform.MEDIA_PLAYER,
     Platform.REMOTE,
     Platform.BUTTON,

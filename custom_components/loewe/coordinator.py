@@ -1,7 +1,7 @@
 """Coordinator for Loewe TV integration (stateless single-source session)."""
 
 from __future__ import annotations
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from xml.sax.saxutils import escape
 from .soap import LoeweSoapClient
@@ -23,8 +23,10 @@ from .network import async_send_wol
 from .tmdb import TmdbArtwork
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from homeassistant.components.media_player import MediaPlayerState
 
 import logging
@@ -47,6 +49,18 @@ POWER_ON_GRACE = 60
 # to AV_NAMES_ATTEMPTS times (an input might genuinely keep such a name).
 AV_NAMES_RETRY = 30
 AV_NAMES_ATTEMPTS = 10
+
+# Recording timers change rarely (and only from the TV's menu or our own
+# record action, which refreshes them at once), so they are polled slowly,
+# plus just after a timer is due to start or end so "recording now" is prompt.
+TIMERS_POLL_INTERVAL = 300
+TIMERS_EDGE_DELAY = 30
+
+# ProgramTimer's repeatDays is documented as a weekday bitmask, but the TV
+# (SL420, SW 5.4) only turns it into its own types: weekdays alone give
+# "Mon-Fri", any weekend day gives "Daily". Its Weekly and Series types can't
+# be set through the API (tested 2026-10-18).
+REPEAT_DAYS = {"weekdays": 0x3E, "daily": 0x7F}
 
 type LoeweConfigEntry = ConfigEntry[LoeweTVCoordinator]
 
@@ -96,6 +110,10 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_on_at = 0.0
         self._power_on_at = 0.0
         self.artwork: Optional[str] = None
+        # Recording timers (None until read; kept while the TV is unreachable)
+        self.timers: Optional[list[dict[str, Any]]] = None
+        self._timers_checked_at = 0.0
+        self._timers_due_at = 0.0  # wall-clock time of the next timer start/end
         self.tmdb: Optional[TmdbArtwork] = None
         self._tmdb_key: Optional[str] = None
         self.set_tmdb_key(entry.options.get(CONF_TMDB_API_KEY) if entry else None)
@@ -141,6 +159,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "status": {"ha_state": MediaPlayerState.OFF},
                 "playback": {},
                 "device": {"ha_state": MediaPlayerState.OFF, "volume": None, "mute": None},
+                "timers": self.timers,
             }
 
         if not self._reachable:
@@ -161,6 +180,13 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.debug("Unable to refresh sources: %s", e)
         elif status.get("ha_state") == MediaPlayerState.ON:
             await self._async_retry_av_names()
+
+        # Timers are readable in standby too
+        if (
+            time.monotonic() - self._timers_checked_at >= TIMERS_POLL_INTERVAL
+            or (self._timers_due_at and time.time() >= self._timers_due_at)
+        ):
+            await self.async_refresh_timers()
 
         # --- Step 2: remaining calls only if status was valid
         playback_resp = await self._safe_request("GetCurrentPlayback")
@@ -210,6 +236,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "volume": volume,
                 "mute": mute,
             },
+            "timers": self.timers,
         }
 
         return data
@@ -676,3 +703,111 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def async_channel_down(self) -> None:
         await self.async_inject_rc_key(LOEWE_RC_CODES["prog_down"])
+
+    # ---------------------- Recording timers ----------------------
+
+    async def async_refresh_timers(self) -> None:
+        """Re-read the TV's recording timers (left as they were if the TV doesn't answer)."""
+        self._timers_checked_at = time.monotonic()
+        timers = parsers.parse_timer_list(await self._safe_request("GetTimerList"))
+        if timers is not None:
+            self.timers = timers
+        now = time.time()
+        edges = [
+            edge + TIMERS_EDGE_DELAY
+            for timer in self.timers or []
+            for edge in (timer["start"], timer["end"])
+            if edge is not None and edge + TIMERS_EDGE_DELAY > now
+        ]
+        self._timers_due_at = min(edges, default=0.0)
+
+    async def async_record(
+        self,
+        *,
+        programme: Optional[str] = None,
+        channel: Optional[str] = None,
+        start: Optional[datetime] = None,
+        end: Optional[datetime] = None,
+        duration: Optional[timedelta] = None,
+        repeat: Optional[str] = None,
+    ) -> None:
+        """Programme a recording on the TV's DR+ recorder.
+
+        Either `programme` ("current" or "next" on the tuned channel, timed from
+        the EPG) or `start` plus `end` or `duration` (on `channel`, default the
+        tuned one), optionally repeating on weekdays or daily. The TV titles
+        such timers "Recording"; the archived recording gets the programme's
+        title. Raises ServiceValidationError for bad input and
+        HomeAssistantError if the TV refuses or doesn't answer.
+        """
+        if not programme and start is None:
+            raise ServiceValidationError("Give a programme (current or next) or a start time")
+        if channel:
+            if not self._sources_loaded:
+                await self.async_refresh_sources()
+            found = self.find_channel(channel)
+            tv_channel = self.lookup_channel(found["locator"]) if found else None
+            if not tv_channel:
+                raise ServiceValidationError(f"No TV channel called {channel!r} on the Loewe TV")
+        else:
+            tv_channel = self.current_channel
+            if not tv_channel:
+                raise ServiceValidationError(
+                    "The Loewe TV isn't showing a TV channel; give a channel to record"
+                )
+
+        now = time.time()
+        if programme:
+            if tv_channel is not self.current_channel:
+                raise ServiceValidationError(
+                    "Only the tuned channel's programmes are known; "
+                    "give a start time to record another channel"
+                )
+            event = self.current_event if programme == "current" else self.next_event
+            if event.get("start") is None or not event.get("duration"):
+                raise ServiceValidationError(f"The TV has no programme information for the {programme} programme")
+            begin = event["start"]
+            finish = begin + event["duration"]
+            if programme == "current":
+                # Already started: record from now to the end of the programme
+                begin = int(now)
+        else:
+            if (end is None) == (duration is None):
+                raise ServiceValidationError("Give either an end time or a duration")
+            begin = int(dt_util.as_timestamp(_local_datetime(start)))
+            finish = (
+                int(dt_util.as_timestamp(_local_datetime(end)))
+                if end is not None
+                else begin + int(duration.total_seconds())
+            )
+        if finish <= max(begin, now):
+            raise ServiceValidationError("That recording would already have ended")
+
+        repeat_bits = REPEAT_DAYS.get(repeat or "", 0)
+
+        extra = (
+            f"<{SOAP_PREFIX}:Device>PVR</{SOAP_PREFIX}:Device>"
+            f"<{SOAP_PREFIX}:RecordingType>default</{SOAP_PREFIX}:RecordingType>"
+            f"<{SOAP_PREFIX}:Locator>{escape(tv_channel['locator'])}</{SOAP_PREFIX}:Locator>"
+            f'<{SOAP_PREFIX}:Timer starttime="{begin}" duration="{finish - begin}" repeatDays="{repeat_bits}"/>'
+        )
+        _LOGGER.debug(
+            "Programming a recording on %s from %s for %s s (repeat %s)",
+            tv_channel["name"], begin, finish - begin, repeat or "none",
+        )
+        result = parsers.parse_result(await self._safe_request("ProgramTimer", extra_xml=extra))
+        if result is None:
+            raise HomeAssistantError("The Loewe TV didn't answer the recording request")
+        if result != 0:
+            raise HomeAssistantError(f"The Loewe TV refused the recording (error {result})")
+
+        # "Accepted" doesn't guarantee the timer exists (a conflict can need
+        # confirming on the TV), so show what the TV now actually has.
+        await self.async_refresh_timers()
+        if self.data is not None:
+            self.async_set_updated_data({**self.data, "timers": self.timers})
+
+
+def _local_datetime(value: datetime) -> datetime:
+    """Treat a naive date/time (as service calls usually give) as HA's local time."""
+    return value if value.tzinfo else value.replace(tzinfo=dt_util.get_default_time_zone())
