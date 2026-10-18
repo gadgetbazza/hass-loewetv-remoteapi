@@ -64,20 +64,16 @@ record:
       description: How long to record. Give this or an end time.
       selector:
         duration:
-    repeat_days:
-      name: Repeat on
-      description: Repeat the recording every week on these days.
+    repeat:
+      name: Repeat
+      description: >-
+        Repeat the recording at this time every weekday (Mon-Fri) or every day. Weekly and series
+        recordings can only be set on the TV.
       selector:
         select:
-          multiple: true
           options:
-            - mon
-            - tue
-            - wed
-            - thu
-            - fri
-            - sat
-            - sun
+            - weekdays
+            - daily
 
 get_guide:
   name: Get guide

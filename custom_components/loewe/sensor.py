@@ -13,7 +13,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 from .parsers import TIMER_ATTR_CONFLICT, TIMER_ATTR_RECORDING
 
-# GetTimerList RecordingType bits, as shown in the recordings attribute
+# GetTimerList RecordingType bits, as shown in the recordings attribute: the TV's
+# Mon-Fri, Daily, Weekly and Series types (Weekly and Series can only be set on the TV)
 _REPEATS = {0x2: "weekdays", 0x4: "daily", 0x8: "weekly", 0x10: "series"}
 
 

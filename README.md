@@ -89,20 +89,23 @@ data:
 ```
 
 ```yaml
-# A channel at a set time, every Saturday
+# A channel at a set time, every weekday
 action: loewe.record
 target:
   entity_id: media_player.lounge_tv
 data:
   channel: "BBC TWO"       # name, favourite number or locator
-  start: "2026-10-24 19:00"
-  duration: "01:00:00"     # or end: "2026-10-24 20:00"
-  repeat_days: [sat]
+  start: "2026-10-19 18:30"
+  duration: "00:30:00"     # or end: "2026-10-19 19:00"
+  repeat: weekdays         # or daily; leave out for a one-off
 ```
 
 - `programme` (current/next) uses the channel the TV is showing. To record anything else, pick it in
   the media browser's [Guide](#programme-guide), or give a channel and start time.
-- The TV names the recording after the guide entry its time matches, otherwise "Recording".
+- The TV titles these timers "Recording"; the integration shows the programme's title from the
+  guide instead, and the finished recording gets the programme's title on the TV.
+- Repeats: the TV's API only offers **weekdays** (Mon-Fri) and **daily**. Weekly and series
+  recordings can only be set up on the TV itself.
 - Timers can't be changed or cancelled through the API: do that in the TV's timer list.
 - The TV accepting a timer doesn't guarantee it will record (a clash with another timer can need
   sorting out on the TV). The **Scheduled Recordings** sensor shows what the TV actually has.
@@ -124,7 +127,7 @@ tap_action:
 ### Programme guide
 The media browser's **Guide** folder lists your favourite channels (all channels if you have no
 favourites). Open a channel, then a day, to see its programmes. Open a programme for its description
-and **Record**, **Record every <day> at this time** (a weekly timer for that slot; the API has no series recording), plus **Watch** while it is on. Programmes already set to record are marked ●. The
+and **Record** (plus **Watch** while it is on). Programmes already set to record are marked ●. The
 guide is the TV's own, read from it on demand (cached for 10 minutes), so it covers what the TV's
 guide covers, usually about a week.
 

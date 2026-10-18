@@ -43,7 +43,7 @@ RECORDING_LOCATOR = "drplus://"
 
 # Media IDs below the Guide folder: guide/<channel key>[/<YYYY-MM-DD>[/<start>]],
 # and the "Record" items, played to programme a recording:
-# record/<channel key>/<start>/<end>[/weekly]
+# record/<channel key>/<start>/<end>
 GUIDE_PREFIX = f"{BROWSE_GUIDE}/"
 RECORD_PREFIX = "record/"
 MEDIA_TYPE_RECORD = "loewe_record"
@@ -349,19 +349,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
                 can_expand=False,
             ))
         record_id = f"{RECORD_PREFIX}{key}/{programme['start']}/{programme['end']}"
-        weekday = dt_util.as_local(dt_util.utc_from_timestamp(programme["start"])).strftime("%A")
         children.append(BrowseMedia(
             title="Scheduled to record ●" if self._is_scheduled(programme) else "Record",
             media_class=MediaClass.EPISODE,
             media_content_id=record_id,
-            media_content_type=MEDIA_TYPE_RECORD,
-            can_play=True,
-            can_expand=False,
-        ))
-        children.append(BrowseMedia(
-            title=f"Record every {weekday} at this time",
-            media_class=MediaClass.EPISODE,
-            media_content_id=f"{record_id}/weekly",
             media_content_type=MEDIA_TYPE_RECORD,
             can_play=True,
             can_expand=False,
@@ -379,21 +370,18 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         return _directory(media_id, self._programme_title(programme), MediaClass.EPISODE, children)
 
     async def _async_record_from_guide(self, media_id: str) -> None:
-        key, start, end, *weekly = media_id[len(RECORD_PREFIX):].split("/")
         try:
+            key, start, end = media_id[len(RECORD_PREFIX):].split("/")
             begin, finish = int(start), int(end)
         except ValueError as err:
             raise HomeAssistantError(f"Bad recording request: {media_id}") from err
         channel = self.coordinator.channel_by_key(key)
         if not channel:
             raise HomeAssistantError(f"Unknown channel: {key}")
-        start_at = dt_util.utc_from_timestamp(begin)
         await self.coordinator.async_record(
             channel=channel["locator"],
-            start=start_at,
+            start=dt_util.utc_from_timestamp(begin),
             end=dt_util.utc_from_timestamp(finish),
-            # The local weekday it starts on, as loewe.record's repeat_days names it
-            repeat_days=[dt_util.as_local(start_at).strftime("%a").lower()] if weekly else None,
         )
 
     # ---------- Recordings ----------

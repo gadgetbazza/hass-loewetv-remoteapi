@@ -24,7 +24,7 @@ from .const import (
     DEFAULT_RESOURCE_PATH,
     PLATFORMS,
 )
-from .coordinator import REPEAT_DAY_BITS, LoeweConfigEntry, LoeweTVCoordinator
+from .coordinator import REPEAT_DAYS, LoeweConfigEntry, LoeweTVCoordinator
 from .network import async_get_device_mac
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ RECORD_SCHEMA = vol.Schema(
         vol.Optional("start"): cv.datetime,
         vol.Optional("end"): cv.datetime,
         vol.Optional("duration"): cv.positive_time_period,
-        vol.Optional("repeat_days"): vol.All(cv.ensure_list, [vol.In(list(REPEAT_DAY_BITS))]),
+        vol.Optional("repeat"): vol.In(list(REPEAT_DAYS)),
     }
 )
 
