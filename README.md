@@ -14,6 +14,8 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Optional programme artwork from [TMDB](https://www.themoviedb.org/) (see [Programme artwork](#programme-artwork))
 - State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
 - Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
+- **Recordings** in the media browser: the DR+ recorder's recordings (title, channel, date, length, thumbnail); select one to play it on the TV. Thumbnails are the [programme artwork](#programme-artwork) from TMDB when set up and matched; otherwise the TV's own thumbnail, a frame from the start that the TV only makes once the recording has been played
+- **Guide** in the media browser: about a week of programmes per channel from the TV's own guide, with **Record** (and **Watch** for what's on now) on each programme (see [Programme guide](#programme-guide))
 
 ### Remote
 - Exposes a full `remote` entity
@@ -51,7 +53,7 @@ data:
 ### Sensors
 - **Current Service**: the channel name, or the input name (e.g. HDMI 1)
 - **Current Programme**: the programme on the current channel, with start/end times, description and next programme as attributes
-- **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, repeat, whether it is recording now or in conflict), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
+- **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, `repeat` (`weekdays`, `daily`, `weekly` or `series`), whether it is recording now or in conflict, and `series_episode` for the episode timers a series recording creates), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
 
 ### Binary sensors
 - **Recording**: on while the TV's DR+ recorder is recording, with the recording's `title` and `channel` as attributes
@@ -60,6 +62,7 @@ data:
 - `loewe.refresh_sources`: re-read the AV inputs and channel lists from the TV (e.g. after a channel scan or renaming an input). Channels and inputs are otherwise loaded once at startup.
 - `loewe.channel_up` / `loewe.channel_down`: step through the TV's channels.
 - `loewe.record`: programme a recording on the TV's DR+ recorder (see [Recording](#recording)).
+- `loewe.get_guide`: return a channel's programmes from the TV's guide (see [Programme guide](#programme-guide)).
 
 ### Switching channels from automations
 `media_player.play_media` accepts a channel name, a favourites number or a channel locator:
@@ -97,9 +100,10 @@ data:
   repeat: weekdays         # or daily; leave out for a one-off
 ```
 
-- The TV's API only gives the guide for the channel it is showing (now and next), so `programme`
-  works for that channel only. For other channels give a start time.
-- The TV titles these timers "Recording"; the finished recording gets the programme's title.
+- `programme` (current/next) uses the channel the TV is showing, or the `channel` given. For
+  anything later, pick it in the media browser's [Guide](#programme-guide), or give a start time.
+- The TV titles these timers "Recording"; the integration shows the programme's title from the
+  guide instead, and the finished recording gets the programme's title on the TV.
 - Repeats: the TV's API only offers **weekdays** (Mon-Fri) and **daily**. Weekly and series
   recordings can only be set up on the TV itself.
 - Timers can't be changed or cancelled through the API: do that in the TV's timer list.
@@ -119,6 +123,27 @@ tap_action:
   data:
     programme: next
 ```
+
+### Programme guide
+The media browser's **Guide** folder lists your favourite channels (all channels if you have no
+favourites). Open a channel, then a day, to see its programmes. Open a programme for its description
+and **Record** (plus **Watch** while it is on). Recording from the guide sends a confirmation to the phone of the person who asked (the companion-app phone their person entity tracks; nothing is sent otherwise). Programmes already set to record are marked ● (the media panel keeps pages it has shown, so go up a level or reload to see a new ●). The
+guide is the TV's own, read from it on demand (cached for 10 minutes), so it covers what the TV's
+guide covers, usually about a week.
+
+`loewe.get_guide` returns the same data for automations or custom cards:
+
+```yaml
+action: loewe.get_guide
+target:
+  entity_id: media_player.lounge_tv
+data:
+  channel: "BBC TWO"   # default: the channel the TV is showing
+  hours: 24            # how far ahead
+response_variable: guide
+```
+
+`guide.programmes` is a list of `title`, `description`, `start` and `end` (local ISO times).
 
 ### Diagnostics
 - Device info (Chassis, SW version, MACs)

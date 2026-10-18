@@ -36,7 +36,7 @@ record:
   fields:
     programme:
       name: Programme
-      description: Record the current or the next programme on the channel the TV is showing.
+      description: Record the current or the next programme, on the channel given or the one the TV is showing.
       example: next
       selector:
         select:
@@ -74,3 +74,30 @@ record:
           options:
             - weekdays
             - daily
+
+get_guide:
+  name: Get guide
+  description: >-
+    Return the programmes on a channel from the TV's own guide, starting with the one on now.
+    Reads from the first targeted TV.
+  target:
+    entity:
+      integration: loewe
+      domain: media_player
+  fields:
+    channel:
+      name: Channel
+      description: Channel name, favourite number or locator. Defaults to the channel the TV is showing.
+      example: BBC TWO
+      selector:
+        text:
+    hours:
+      name: Hours
+      description: How far ahead to list programmes (the TV's guide covers about a week).
+      default: 24
+      selector:
+        number:
+          min: 0.5
+          max: 192
+          step: 0.5
+          unit_of_measurement: h

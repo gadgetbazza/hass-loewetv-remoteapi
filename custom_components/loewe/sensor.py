@@ -11,9 +11,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
-from .parsers import TIMER_ATTR_CONFLICT, TIMER_ATTR_RECORDING
+from .parsers import TIMER_ATTR_CONFLICT, TIMER_ATTR_RECORDING, TIMER_ATTR_SERIES
 
-# GetTimerList RecordingType bits, as shown in the recordings attribute
+# GetTimerList RecordingType bits, as shown in the recordings attribute: the TV's
+# Mon-Fri, Daily, Weekly and Series types (Weekly and Series can only be set on the TV)
 _REPEATS = {0x2: "weekdays", 0x4: "daily", 0x8: "weekly", 0x10: "series"}
 
 
@@ -127,6 +128,9 @@ class ScheduledRecordingsSensor(CoordinatorEntity, SensorEntity):
                 ),
                 "recording": bool(timer["attributes"] & TIMER_ATTR_RECORDING),
                 "conflict": bool(timer["attributes"] & TIMER_ATTR_CONFLICT),
+                # A series recording is one "series" timer (repeat: series) that the
+                # TV fills with episode timers, which have this set
+                "series_episode": bool(timer["attributes"] & TIMER_ATTR_SERIES),
             }
             for timer in self._timers or []
         ]

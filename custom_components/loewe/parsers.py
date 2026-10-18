@@ -1,10 +1,12 @@
 """Response parsers for Loewe TV SOAP API."""
 
 from __future__ import annotations
+from datetime import datetime
 from typing import Any, Optional
 from homeassistant.components.media_player.const import MediaPlayerState
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 
 _LOGGER = logging.getLogger(__name__)
@@ -280,9 +282,24 @@ def parse_event(xml: Optional[str]) -> dict[str, Any]:
     return event
 
 
+def full_title(title: str, subtitle: str | None) -> str:
+    """Join a guide title cut short with "..." to its continuation.
+
+    UK guide data splits long titles: "The Balkans: Europe's Forgotten..." with
+    the rest starting the description ("...Frontier. 1/2. The BBC's...").
+    Otherwise the description isn't part of the title.
+    """
+    if subtitle and title.endswith("...") and subtitle.startswith("..."):
+        # The continuation runs to the end of its first sentence ("?" and "!" belong to the title)
+        rest = re.split(r"(?<=[.?!])\s", subtitle[3:], maxsplit=1)[0].rstrip(".")
+        return f"{title[:-3]} {rest}" if not title[-4:-3].isspace() else f"{title[:-3]}{rest}"
+    return title
+
+
 # GetTimerList Attributes bits (API spec 9.13.1)
 TIMER_ATTR_RECORDING = 0x80
 TIMER_ATTR_CONFLICT = 0x20
+TIMER_ATTR_SERIES = 0x2000  # an episode timer created by a series recording
 
 
 def parse_timer_list(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
@@ -334,3 +351,90 @@ def parse_result(xml: Optional[str]) -> Optional[int]:
         return int((found.text or "").strip()) if found is not None else None
     except ValueError:
         return None
+
+
+# de.loewe.sl2.epg fields requested by the guide, in this order (API spec 9.22.1;
+# meanings of 2003/2005/2008 found by testing)
+EPG_FIELDS = (2003, 2004, 2005, 2007, 2008)  # event id, title, description, start, end
+
+
+def parse_guide(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """
+    Parse a CreateIterator reply over the EPG table (fields EPG_FIELDS).
+
+    Returns [{"event_id", "title", "description", "start", "end"}] with Unix
+    timestamps, or None if the reply has no rows element (no answer, or refused).
+    """
+    resp = _extract_response_body(xml)
+    rows = _find(resp, "Rows") if resp is not None else None
+    if rows is None:
+        return None
+
+    programmes = []
+    for row in rows:
+        if _local(row.tag) != "Row":
+            continue
+        values = [(v.text or "").strip() for v in row if _local(v.tag) == "V"]
+        if len(values) < len(EPG_FIELDS):
+            continue
+        event_id, title, description, start, end = values[: len(EPG_FIELDS)]
+        try:
+            start_ts, end_ts = int(start), int(end)
+        except ValueError:
+            continue
+        if title:
+            programmes.append({
+                "event_id": event_id or None,
+                "title": full_title(title, description),
+                "description": description or None,
+                "start": start_ts,
+                "end": end_ts,
+            })
+    return programmes
+
+
+def parse_recordings(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """
+    Parse GetDRPlusArchive into the recorder's recordings, newest first.
+
+    Each is {"locator", "title", "subtitle", "channel", "start" (Unix time),
+    "duration" (seconds), "image"}. None if the reply has no archive list.
+    """
+    resp = _extract_response_body(xml)
+    if resp is None or _find(resp, "ResultItemDRPlusFragment") is None:
+        return None
+
+    def text(el: ET.Element, name: str) -> Optional[str]:
+        found = _find(el, name)
+        return (found.text or "").strip() or None if found is not None else None
+
+    recordings = []
+    for item in resp.iter():
+        if _local(item.tag) != "ResultItemDRPlus":
+            continue
+        locator = text(item, "Locator")
+        if not locator:
+            continue
+        start = None
+        if started := text(item, "StartTime"):
+            try:
+                start = int(datetime.fromisoformat(started).timestamp())
+            except ValueError:
+                pass
+        duration = None
+        if length := text(item, "Duration"):  # "HH:MM:SS.mmm"
+            try:
+                hours, minutes, seconds = length.split(":")
+                duration = int(hours) * 3600 + int(minutes) * 60 + int(float(seconds))
+            except ValueError:
+                pass
+        recordings.append({
+            "locator": locator,
+            "title": full_title(text(item, "Title") or "Recording", text(item, "Subtitle")),
+            "subtitle": text(item, "Subtitle"),
+            "channel": text(item, "ServiceName"),
+            "start": start,
+            "duration": duration,
+            "image": text(item, "ImageUrl"),
+        })
+    return sorted(recordings, key=lambda r: r["start"] or 0, reverse=True)
