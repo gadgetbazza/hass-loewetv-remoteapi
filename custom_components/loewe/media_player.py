@@ -3,10 +3,10 @@
 from __future__ import annotations
 import asyncio
 import logging
-
-import aiohttp
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+
+import aiohttp
 
 from homeassistant.components.media_player import (
     BrowseError,
@@ -82,7 +82,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_media"
         self._attr_device_info = coordinator.device_info
-        # Recording locator -> thumbnail URL (the TV's, else TMDB's), from the last Recordings listing
+        # Recording locator -> thumbnail URL (TMDB's, else the TV's), from the last Recordings listing
         self._recording_images: dict[str, str] = {}
         # Recordings whose TV thumbnail exists: the TV makes one on first playback, and keeps it
         self._tv_thumbnails: set[str] = set()
@@ -462,7 +462,14 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         return _directory(BROWSE_RECORDINGS, BROWSE_FOLDERS[BROWSE_RECORDINGS], MediaClass.EPISODE, children)
 
     async def _async_recording_image(self, rec: dict[str, Any]) -> str | None:
-        """The TV's thumbnail if it has made one, else TMDB artwork for the title (if set up)."""
+        """TMDB artwork for the title (if set up), else the TV's thumbnail if it has made one.
+
+        The TV's thumbnail is a frame from the start of the recording (often an
+        ident or black), made only on first playback, so TMDB's is preferred.
+        """
+        tmdb = self.coordinator.tmdb
+        if tmdb and (artwork := await tmdb.async_lookup(rec["title"])):
+            return artwork
         locator, url = rec["locator"], rec["image"]
         if url and locator not in self._tv_thumbnails:
             try:
@@ -473,10 +480,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
                         self._tv_thumbnails.add(locator)
             except (aiohttp.ClientError, asyncio.TimeoutError):
                 pass
-        if url and locator in self._tv_thumbnails:
-            return url
-        tmdb = self.coordinator.tmdb
-        return await tmdb.async_lookup(rec["title"]) if tmdb else None
+        return url if url and locator in self._tv_thumbnails else None
 
     async def async_get_browse_image(
         self,
