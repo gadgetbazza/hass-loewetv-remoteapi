@@ -6,6 +6,7 @@ from typing import Any, Optional
 from homeassistant.components.media_player.const import MediaPlayerState
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 
 _LOGGER = logging.getLogger(__name__)
@@ -289,7 +290,8 @@ def full_title(title: str, subtitle: str | None) -> str:
     Otherwise the description isn't part of the title.
     """
     if subtitle and title.endswith("...") and subtitle.startswith("..."):
-        rest = subtitle[3:].split(". ", 1)[0].rstrip(".")
+        # The continuation runs to the end of its first sentence ("?" and "!" belong to the title)
+        rest = re.split(r"(?<=[.?!])\s", subtitle[3:], maxsplit=1)[0].rstrip(".")
         return f"{title[:-3]} {rest}" if not title[-4:-3].isspace() else f"{title[:-3]}{rest}"
     return title
 
