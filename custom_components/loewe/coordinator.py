@@ -642,6 +642,12 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 self.current_event, self.next_event = {}, {}
                 break
+        if not self.current_event:
+            # The TV's now/next calls sometimes answer empty for a while (seen
+            # after playing a recording); the guide still has the programmes
+            self.current_event, self.next_event = await self._async_events_from_guide(
+                self.current_channel
+            )
         self._event_locator = self.current_locator
         self.artwork = (
             await self.tmdb.async_lookup(self.current_event.get("name")) if self.tmdb else None
@@ -749,6 +755,31 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
         self._timers_due_at = min(edges, default=0.0)
 
+    async def _async_events_from_guide(
+        self, channel: dict[str, str]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The current and next programme on a channel from the guide, as parse_event dicts."""
+        try:
+            programmes = await self.async_get_guide(channel)
+        except HomeAssistantError:
+            return {}, {}
+        now = time.time()
+
+        def event(programme: Optional[dict[str, Any]]) -> dict[str, Any]:
+            if not programme:
+                return {}
+            return {
+                "name": programme["title"],
+                "info": programme["description"] or "",
+                "start": programme["start"],
+                "duration": programme["end"] - programme["start"],
+                "locator": channel["locator"],
+            }
+
+        on_now = next((p for p in programmes if p["start"] <= now < p["end"]), None)
+        after = next((p for p in programmes if p["start"] >= (on_now["end"] if on_now else now)), None)
+        return event(on_now), event(after)
+
     async def _async_name_timers(self, timers: list[dict[str, Any]]) -> None:
         """Give timers the TV left as "Recording" the title of the programme they cover.
 
@@ -810,12 +841,11 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         now = time.time()
         if programme:
-            if tv_channel is not self.current_channel:
-                raise ServiceValidationError(
-                    "Only the tuned channel's programmes are known; "
-                    "give a start time to record another channel"
-                )
-            event = self.current_event if programme == "current" else self.next_event
+            if tv_channel is self.current_channel and self.current_event:
+                current, nxt = self.current_event, self.next_event
+            else:
+                current, nxt = await self._async_events_from_guide(tv_channel)
+            event = current if programme == "current" else nxt
             if event.get("start") is None or not event.get("duration"):
                 raise ServiceValidationError(f"The TV has no programme information for the {programme} programme")
             begin = event["start"]

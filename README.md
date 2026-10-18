@@ -100,8 +100,8 @@ data:
   repeat: weekdays         # or daily; leave out for a one-off
 ```
 
-- `programme` (current/next) uses the channel the TV is showing. To record anything else, pick it in
-  the media browser's [Guide](#programme-guide), or give a channel and start time.
+- `programme` (current/next) uses the channel the TV is showing, or the `channel` given. For
+  anything later, pick it in the media browser's [Guide](#programme-guide), or give a start time.
 - The TV titles these timers "Recording"; the integration shows the programme's title from the
   guide instead, and the finished recording gets the programme's title on the TV.
 - Repeats: the TV's API only offers **weekdays** (Mon-Fri) and **daily**. Weekly and series

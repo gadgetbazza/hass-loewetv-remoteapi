@@ -36,7 +36,7 @@ record:
   fields:
     programme:
       name: Programme
-      description: Record the current or the next programme on the channel the TV is showing.
+      description: Record the current or the next programme, on the channel given or the one the TV is showing.
       example: next
       selector:
         select:
