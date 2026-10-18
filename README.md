@@ -129,7 +129,10 @@ Replace `lounge_tv` with your own entity names (it appears three times).
 type: custom:mod-card
 card_mod:
   style: |
-    {% set pic = state_attr('media_player.lounge_tv', 'entity_picture') %}
+    {% set tv = 'media_player.lounge_tv' %}
+    {# Optional: TV inputs whose artwork comes from another media player, e.g. {'HDMI 1': 'media_player.apple_tv'} #}
+    {% set inputs = {} %}
+    {% set pic = state_attr(inputs.get(state_attr(tv, 'source')) or tv, 'entity_picture') %}
     ha-card { position: relative; overflow: hidden; background: var(--card-background-color); }
     ha-card > * { position: relative; z-index: 1;
       --ha-card-background: transparent; --ha-card-border-width: 0; --ha-card-box-shadow: none;
@@ -188,8 +191,11 @@ card:
         - {type: button, name: blue, icon: mdi:square-rounded, tap_action: {action: key, key: blue}, styles: ":host { --icon-color: #1976d2; }"}
 ```
 
-The background follows whatever the media player shows: the channel's programme artwork when
-[Programme artwork](#programme-artwork) is set up, otherwise the plain card. Any key from the
+The background follows whatever the TV shows: on a TV channel, the programme artwork when
+[Programme artwork](#programme-artwork) is set up. On an HDMI input the TV itself knows only the input,
+so to show the artwork of the box plugged into it (Apple TV, Sky, a games console…) list it in
+`inputs` at the top of the style, keyed by the input's name as it appears in the TV's source list.
+With no artwork the card is plain, and the d-pad follows your theme. Any key from the
 [Remote](#remote) table can be added the same way. `recordings` opens the DR+ archive on TVs with a
 recorder; drop it from `rows` if yours has none. Without card-mod, use the inner `vertical-stack` on
 its own and set `artwork: cover` on the media player.
