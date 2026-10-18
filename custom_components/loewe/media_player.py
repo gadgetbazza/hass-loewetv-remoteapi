@@ -30,12 +30,16 @@ BROWSE_FAVOURITES = "favourites"
 BROWSE_ALL_CHANNELS = "all_channels"
 BROWSE_INPUTS = "inputs"
 BROWSE_GUIDE = "guide"
+BROWSE_RECORDINGS = "recordings"
 BROWSE_FOLDERS = {
     BROWSE_FAVOURITES: "Favourites",
     BROWSE_ALL_CHANNELS: "All channels",
     BROWSE_INPUTS: "Inputs",
     BROWSE_GUIDE: "Guide",
+    BROWSE_RECORDINGS: "Recordings",
 }
+# Recordings are played by their archive locator
+RECORDING_LOCATOR = "drplus://"
 
 # Media IDs below the Guide folder: guide/<channel key>[/<YYYY-MM-DD>[/<start>]],
 # and the "Record" items, played to programme a recording:
@@ -201,6 +205,8 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             )
         if media_content_id == BROWSE_GUIDE:
             return self._browse_guide_channels()
+        if media_content_id == BROWSE_RECORDINGS:
+            return await self._async_browse_recordings()
         if media_content_id.startswith(GUIDE_PREFIX):
             return await self._async_browse_guide(media_content_id[len(GUIDE_PREFIX):].split("/"))
         if media_content_id in BROWSE_FOLDERS:
@@ -215,8 +221,9 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         return self.coordinator.available_sources
 
     def _browse_folder(self, folder: str, with_children: bool = False) -> BrowseMedia:
-        if folder == BROWSE_GUIDE and not with_children:
-            return _directory(BROWSE_GUIDE, BROWSE_FOLDERS[BROWSE_GUIDE], MediaClass.CHANNEL)
+        if folder in (BROWSE_GUIDE, BROWSE_RECORDINGS) and not with_children:
+            children_class = MediaClass.CHANNEL if folder == BROWSE_GUIDE else MediaClass.EPISODE
+            return _directory(folder, BROWSE_FOLDERS[folder], children_class)
         children = None
         if with_children:
             children = [
@@ -387,6 +394,27 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             repeat_days=[dt_util.as_local(start_at).strftime("%a").lower()] if weekly else None,
         )
 
+    # ---------- Recordings ----------
+    async def _async_browse_recordings(self) -> BrowseMedia:
+        children = []
+        for rec in await self.coordinator.async_get_recordings():
+            details = [rec["channel"]]
+            if rec["start"] is not None:
+                details.append(f"{dt_util.as_local(dt_util.utc_from_timestamp(rec['start'])):%a %d %b %H:%M}")
+            if rec["duration"]:
+                details.append(f"{round(rec['duration'] / 60)} min")
+            title = rec["title"]
+            children.append(BrowseMedia(
+                title=f"{title} ({', '.join(d for d in details if d)})",
+                media_class=MediaClass.EPISODE,
+                media_content_id=rec["locator"],
+                media_content_type=MediaType.EPISODE,
+                can_play=True,
+                can_expand=False,
+                thumbnail=rec["image"],
+            ))
+        return _directory(BROWSE_RECORDINGS, BROWSE_FOLDERS[BROWSE_RECORDINGS], MediaClass.EPISODE, children)
+
     async def async_play_media(self, media_type: str, media_id: str, **kwargs: Any) -> None:
         """Switch to a channel/input given its locator, name or favourite number,
         or programme a recording picked in the guide."""
@@ -399,7 +427,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             return
         item = self.coordinator.find_channel(media_id)
         locator = item["locator"] if item else media_id
-        if not item and not media_id.startswith("channel://"):
+        if not item and not media_id.startswith(("channel://", RECORDING_LOCATOR)):
             raise HomeAssistantError(f"Unknown Loewe channel or input: {media_id}")
         if not await self.coordinator.async_set_channel(locator):
             raise HomeAssistantError(f"Loewe TV did not switch to {media_id}")
@@ -487,3 +515,4 @@ def _day_title(day: date, today: date) -> str:
     if day == today + timedelta(days=1):
         return "Tomorrow"
     return f"{day:%A} {day.day} {day:%B}"
+

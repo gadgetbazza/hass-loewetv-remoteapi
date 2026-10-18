@@ -915,6 +915,21 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return programmes
 
 
+    # ---------------------- Recordings archive ----------------------
+
+    async def async_get_recordings(self) -> list[dict[str, Any]]:
+        """The DR+ recorder's recordings, newest first. Raises HomeAssistantError if no answer."""
+        extra = (
+            f"<{SOAP_PREFIX}:QueryParameters>"
+            f'<{SOAP_PREFIX}:Range startIndex="0" maxItems="1000"/>'
+            f"</{SOAP_PREFIX}:QueryParameters>"
+        )
+        recordings = parsers.parse_recordings(await self._safe_request("GetDRPlusArchive", extra_xml=extra))
+        if recordings is None:
+            raise HomeAssistantError("The Loewe TV didn't send its recordings")
+        return recordings
+
+
 def _local_datetime(value: datetime) -> datetime:
     """Treat a naive date/time (as service calls usually give) as HA's local time."""
     return value if value.tzinfo else value.replace(tzinfo=dt_util.get_default_time_zone())

@@ -1,6 +1,7 @@
 """Response parsers for Loewe TV SOAP API."""
 
 from __future__ import annotations
+from datetime import datetime
 from typing import Any, Optional
 from homeassistant.components.media_player.const import MediaPlayerState
 
@@ -280,6 +281,19 @@ def parse_event(xml: Optional[str]) -> dict[str, Any]:
     return event
 
 
+def full_title(title: str, subtitle: str | None) -> str:
+    """Join a guide title cut short with "..." to its continuation.
+
+    UK guide data splits long titles: "The Balkans: Europe's Forgotten..." with
+    the rest starting the description ("...Frontier. 1/2. The BBC's...").
+    Otherwise the description isn't part of the title.
+    """
+    if subtitle and title.endswith("...") and subtitle.startswith("..."):
+        rest = subtitle[3:].split(". ", 1)[0].rstrip(".")
+        return f"{title[:-3]} {rest}" if not title[-4:-3].isspace() else f"{title[:-3]}{rest}"
+    return title
+
+
 # GetTimerList Attributes bits (API spec 9.13.1)
 TIMER_ATTR_RECORDING = 0x80
 TIMER_ATTR_CONFLICT = 0x20
@@ -368,9 +382,56 @@ def parse_guide(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
         if title:
             programmes.append({
                 "event_id": event_id or None,
-                "title": title,
+                "title": full_title(title, description),
                 "description": description or None,
                 "start": start_ts,
                 "end": end_ts,
             })
     return programmes
+
+
+def parse_recordings(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """
+    Parse GetDRPlusArchive into the recorder's recordings, newest first.
+
+    Each is {"locator", "title", "subtitle", "channel", "start" (Unix time),
+    "duration" (seconds), "image"}. None if the reply has no archive list.
+    """
+    resp = _extract_response_body(xml)
+    if resp is None or _find(resp, "ResultItemDRPlusFragment") is None:
+        return None
+
+    def text(el: ET.Element, name: str) -> Optional[str]:
+        found = _find(el, name)
+        return (found.text or "").strip() or None if found is not None else None
+
+    recordings = []
+    for item in resp.iter():
+        if _local(item.tag) != "ResultItemDRPlus":
+            continue
+        locator = text(item, "Locator")
+        if not locator:
+            continue
+        start = None
+        if started := text(item, "StartTime"):
+            try:
+                start = int(datetime.fromisoformat(started).timestamp())
+            except ValueError:
+                pass
+        duration = None
+        if length := text(item, "Duration"):  # "HH:MM:SS.mmm"
+            try:
+                hours, minutes, seconds = length.split(":")
+                duration = int(hours) * 3600 + int(minutes) * 60 + int(float(seconds))
+            except ValueError:
+                pass
+        recordings.append({
+            "locator": locator,
+            "title": full_title(text(item, "Title") or "Recording", text(item, "Subtitle")),
+            "subtitle": text(item, "Subtitle"),
+            "channel": text(item, "ServiceName"),
+            "start": start,
+            "duration": duration,
+            "image": text(item, "ImageUrl"),
+        })
+    return sorted(recordings, key=lambda r: r["start"] or 0, reverse=True)

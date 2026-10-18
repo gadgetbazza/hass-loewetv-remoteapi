@@ -14,6 +14,7 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Optional programme artwork from [TMDB](https://www.themoviedb.org/) (see [Programme artwork](#programme-artwork))
 - State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
 - Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
+- **Recordings** in the media browser: the DR+ recorder's recordings (title, channel, date, length, thumbnail); select one to play it on the TV
 - **Guide** in the media browser: about a week of programmes per channel from the TV's own guide, with **Record** (and **Watch** for what's on now) on each programme (see [Programme guide](#programme-guide))
 
 ### Remote
