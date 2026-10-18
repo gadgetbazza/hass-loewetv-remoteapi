@@ -56,8 +56,11 @@ AV_NAMES_ATTEMPTS = 10
 TIMERS_POLL_INTERVAL = 300
 TIMERS_EDGE_DELAY = 30
 
-# ProgramTimer's repeatDays bitmask (API spec 9.13)
-REPEAT_DAY_BITS = {"sun": 0x01, "mon": 0x02, "tue": 0x04, "wed": 0x08, "thu": 0x10, "fri": 0x20, "sat": 0x40}
+# ProgramTimer's repeatDays is documented as a weekday bitmask, but the TV
+# (SL420, SW 5.4) only turns it into its own types: weekdays alone give
+# "Mon-Fri", any weekend day gives "Daily". Its Weekly and Series types can't
+# be set through the API (tested 2026-10-18).
+REPEAT_DAYS = {"weekdays": 0x3E, "daily": 0x7F}
 
 type LoeweConfigEntry = ConfigEntry[LoeweTVCoordinator]
 
@@ -726,14 +729,15 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         start: Optional[datetime] = None,
         end: Optional[datetime] = None,
         duration: Optional[timedelta] = None,
-        repeat_days: Optional[list[str]] = None,
+        repeat: Optional[str] = None,
     ) -> None:
         """Programme a recording on the TV's DR+ recorder.
 
         Either `programme` ("current" or "next" on the tuned channel, timed from
         the EPG) or `start` plus `end` or `duration` (on `channel`, default the
-        tuned one). The TV names the recording after the EPG event it matches,
-        otherwise "Recording". Raises ServiceValidationError for bad input and
+        tuned one), optionally repeating on weekdays or daily. The TV titles
+        such timers "Recording"; the archived recording gets the programme's
+        title. Raises ServiceValidationError for bad input and
         HomeAssistantError if the TV refuses or doesn't answer.
         """
         if not programme and start is None:
@@ -779,19 +783,17 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if finish <= max(begin, now):
             raise ServiceValidationError("That recording would already have ended")
 
-        repeat = 0
-        for day in repeat_days or []:
-            repeat |= REPEAT_DAY_BITS[day]
+        repeat_bits = REPEAT_DAYS.get(repeat or "", 0)
 
         extra = (
             f"<{SOAP_PREFIX}:Device>PVR</{SOAP_PREFIX}:Device>"
             f"<{SOAP_PREFIX}:RecordingType>default</{SOAP_PREFIX}:RecordingType>"
             f"<{SOAP_PREFIX}:Locator>{escape(tv_channel['locator'])}</{SOAP_PREFIX}:Locator>"
-            f'<{SOAP_PREFIX}:Timer starttime="{begin}" duration="{finish - begin}" repeatDays="{repeat}"/>'
+            f'<{SOAP_PREFIX}:Timer starttime="{begin}" duration="{finish - begin}" repeatDays="{repeat_bits}"/>'
         )
         _LOGGER.debug(
-            "Programming a recording on %s from %s for %s s (repeat %#x)",
-            tv_channel["name"], begin, finish - begin, repeat,
+            "Programming a recording on %s from %s for %s s (repeat %s)",
+            tv_channel["name"], begin, finish - begin, repeat or "none",
         )
         result = parsers.parse_result(await self._safe_request("ProgramTimer", extra_xml=extra))
         if result is None:
