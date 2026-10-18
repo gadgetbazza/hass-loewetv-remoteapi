@@ -22,3 +22,59 @@ channel_down:
       integration: loewe
       domain: media_player
 
+
+record:
+  name: Record
+  description: >-
+    Programme a recording on the TV's built-in DR+ recorder. Give either a programme (the current or
+    next one on the tuned channel, timed from the TV's guide) or a start time with an end time or
+    duration. Timers can't be cancelled from Home Assistant; use the TV's timer list.
+  target:
+    entity:
+      integration: loewe
+      domain: media_player
+  fields:
+    programme:
+      name: Programme
+      description: Record the current or the next programme on the channel the TV is showing.
+      example: next
+      selector:
+        select:
+          options:
+            - current
+            - next
+    channel:
+      name: Channel
+      description: Channel name, favourite number or locator, for a recording at a set time. Defaults to the channel the TV is showing.
+      example: BBC TWO
+      selector:
+        text:
+    start:
+      name: Start
+      description: When to start recording (local time).
+      selector:
+        datetime:
+    end:
+      name: End
+      description: When to stop recording. Give this or a duration.
+      selector:
+        datetime:
+    duration:
+      name: Duration
+      description: How long to record. Give this or an end time.
+      selector:
+        duration:
+    repeat_days:
+      name: Repeat on
+      description: Repeat the recording every week on these days.
+      selector:
+        select:
+          multiple: true
+          options:
+            - mon
+            - tue
+            - wed
+            - thu
+            - fri
+            - sat
+            - sun

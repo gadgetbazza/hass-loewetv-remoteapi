@@ -278,3 +278,59 @@ def parse_event(xml: Optional[str]) -> dict[str, Any]:
         except ValueError:
             pass
     return event
+
+
+# GetTimerList Attributes bits (API spec 9.13.1)
+TIMER_ATTR_RECORDING = 0x80
+TIMER_ATTR_CONFLICT = 0x20
+
+
+def parse_timer_list(xml: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """
+    Parse GetTimerList into a list of recording timers, sorted by start time.
+
+    Each timer is {"id", "title", "channel", "channel_number", "channel_id",
+    "start", "end", "recording_type", "attributes"}; "start"/"end" are Unix
+    timestamps. Returns None if the reply has no timer list at all (not
+    reachable, or not supported), [] if there are no timers.
+    """
+    resp = _extract_response_body(xml)
+    if resp is None or _find(resp, "ResultTimerListFragment") is None:
+        return None
+
+    def text(el: ET.Element, name: str) -> Optional[str]:
+        found = _find(el, name)
+        return (found.text or "").strip() or None if found is not None else None
+
+    def number(el: ET.Element, name: str) -> Optional[int]:
+        try:
+            return int(text(el, name) or "")
+        except ValueError:
+            return None
+
+    timers = []
+    for entry in resp.iter():
+        if _local(entry.tag) != "ResultTimerList":
+            continue
+        timers.append({
+            "id": text(entry, "EntryUuid"),
+            "title": text(entry, "EntryTitle"),
+            "channel": text(entry, "SourceName"),
+            "channel_number": text(entry, "SourceNo"),
+            "channel_id": text(entry, "SourceUuid"),
+            "start": number(entry, "Start"),
+            "end": number(entry, "End"),
+            "recording_type": number(entry, "RecordingType") or 0,
+            "attributes": number(entry, "Attributes") or 0,
+        })
+    return sorted(timers, key=lambda t: t["start"] or 0)
+
+
+def parse_result(xml: Optional[str]) -> Optional[int]:
+    """Return the <Result> code of a command reply (0 = accepted), or None if missing."""
+    resp = _extract_response_body(xml)
+    found = _find(resp, "Result") if resp is not None else None
+    try:
+        return int((found.text or "").strip()) if found is not None else None
+    except ValueError:
+        return None

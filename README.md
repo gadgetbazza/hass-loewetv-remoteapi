@@ -51,10 +51,12 @@ data:
 ### Sensors
 - **Current Service**: the channel name, or the input name (e.g. HDMI 1)
 - **Current Programme**: the programme on the current channel, with start/end times, description and next programme as attributes
+- **Scheduled Recordings**: the number of recording timers on the TV's DR+ recorder; the `recordings` attribute lists each one (title, channel, start, end, repeat, whether it is recording now or in conflict), and `recording_now` is true while one is recording. Read every 5 minutes, and straight after `loewe.record`
 
 ### Services
 - `loewe.refresh_sources`: re-read the AV inputs and channel lists from the TV (e.g. after a channel scan or renaming an input). Channels and inputs are otherwise loaded once at startup.
 - `loewe.channel_up` / `loewe.channel_down`: step through the TV's channels.
+- `loewe.record`: programme a recording on the TV's DR+ recorder (see [Recording](#recording)).
 
 ### Switching channels from automations
 `media_player.play_media` accepts a channel name, a favourites number or a channel locator:
@@ -66,6 +68,51 @@ target:
 data:
   media_content_type: channel
   media_content_id: "BBC TWO"   # or "2" for favourite number 2
+```
+
+### Recording
+On TVs with a DR+ recorder (a built-in or USB disk), `loewe.record` programmes a recording timer:
+
+```yaml
+# The programme after this one on the channel the TV is showing
+action: loewe.record
+target:
+  entity_id: media_player.lounge_tv
+data:
+  programme: next          # or "current": from now until the programme ends
+```
+
+```yaml
+# A channel at a set time, every Saturday
+action: loewe.record
+target:
+  entity_id: media_player.lounge_tv
+data:
+  channel: "BBC TWO"       # name, favourite number or locator
+  start: "2026-10-24 19:00"
+  duration: "01:00:00"     # or end: "2026-10-24 20:00"
+  repeat_days: [sat]
+```
+
+- The TV's API only gives the guide for the channel it is showing (now and next), so `programme`
+  works for that channel only. For other channels give a start time.
+- The TV names the recording after the guide entry its time matches, otherwise "Recording".
+- Timers can't be changed or cancelled through the API: do that in the TV's timer list.
+- The TV accepting a timer doesn't guarantee it will record (a clash with another timer can need
+  sorting out on the TV). The **Scheduled Recordings** sensor shows what the TV actually has.
+- A "Record next" button for a dashboard:
+
+```yaml
+type: button
+name: Record next
+icon: mdi:record-rec
+tap_action:
+  action: perform-action
+  perform_action: loewe.record
+  target:
+    entity_id: media_player.lounge_tv
+  data:
+    programme: next
 ```
 
 ### Diagnostics

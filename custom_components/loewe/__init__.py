@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import ATTR_ENTITY_ID, ENTITY_MATCH_ALL
 from homeassistant.core import HomeAssistant, ServiceCall
@@ -20,12 +22,24 @@ from .const import (
     DEFAULT_RESOURCE_PATH,
     PLATFORMS,
 )
-from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
+from .coordinator import REPEAT_DAY_BITS, LoeweConfigEntry, LoeweTVCoordinator
 from .network import async_get_device_mac
 
 _LOGGER = logging.getLogger(__name__)
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+RECORD_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTITY_ID): cv.comp_entity_ids,
+        vol.Optional("programme"): vol.In(["current", "next"]),
+        vol.Optional("channel"): cv.string,
+        vol.Optional("start"): cv.datetime,
+        vol.Optional("end"): cv.datetime,
+        vol.Optional("duration"): cv.positive_time_period,
+        vol.Optional("repeat_days"): vol.All(cv.ensure_list, [vol.In(list(REPEAT_DAY_BITS))]),
+    }
+)
 
 
 def _loaded_coordinators(hass: HomeAssistant) -> dict[str, LoeweTVCoordinator]:
@@ -73,9 +87,16 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             await coordinator.async_refresh_sources()
             await coordinator.async_request_refresh()
 
+    async def handle_record(call: ServiceCall) -> None:
+        """Programme a recording on the targeted TV(s)."""
+        options = {k: v for k, v in call.data.items() if k != ATTR_ENTITY_ID}
+        for coordinator in _target_coordinators(hass, call):
+            await coordinator.async_record(**options)
+
     hass.services.async_register(DOMAIN, "channel_up", handle_channel_up)
     hass.services.async_register(DOMAIN, "channel_down", handle_channel_down)
     hass.services.async_register(DOMAIN, "refresh_sources", handle_refresh_sources)
+    hass.services.async_register(DOMAIN, "record", handle_record, schema=RECORD_SCHEMA)
     return True
 
 
