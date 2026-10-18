@@ -379,6 +379,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         if media_id.startswith(RECORD_PREFIX):
             await self._async_record_from_guide(media_id)
             return
+        if media_id.startswith(GUIDE_PREFIX):
+            # The programme description item: the media panel "plays" any item
+            # that can't be opened, so a tap on it is ignored
+            return
         item = self.coordinator.find_channel(media_id)
         locator = item["locator"] if item else media_id
         if not item and not media_id.startswith("channel://"):

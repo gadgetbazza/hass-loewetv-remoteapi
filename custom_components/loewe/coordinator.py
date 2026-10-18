@@ -721,6 +721,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._timers_checked_at = time.monotonic()
         timers = parsers.parse_timer_list(await self._safe_request("GetTimerList"))
         if timers is not None:
+            await self._async_name_timers(timers)
             self.timers = timers
         now = time.time()
         edges = [
@@ -730,6 +731,30 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if edge is not None and edge + TIMERS_EDGE_DELAY > now
         ]
         self._timers_due_at = min(edges, default=0.0)
+
+    async def _async_name_timers(self, timers: list[dict[str, Any]]) -> None:
+        """Give timers the TV left as "Recording" the title of the programme they cover.
+
+        The TV is meant to take the title from the guide, but timers set through
+        the API keep the default name (and no EPG event ID).
+        """
+        for timer in timers:
+            if timer["title"] not in (None, "Recording") or timer["start"] is None or timer["end"] is None:
+                continue
+            channel = self._channels_by_key.get(timer.get("channel_id") or "")
+            if not channel:
+                continue
+            try:
+                programmes = await self.async_get_guide(channel)
+            except HomeAssistantError:
+                continue
+
+            def overlap(programme: dict[str, Any]) -> int:
+                return min(programme["end"], timer["end"]) - max(programme["start"], timer["start"])
+
+            best = max(programmes, key=overlap, default=None)
+            if best and overlap(best) > 0:
+                timer["title"] = best["title"]
 
     async def async_record(
         self,
