@@ -127,7 +127,7 @@ tap_action:
 ### Programme guide
 The media browser's **Guide** folder lists your favourite channels (all channels if you have no
 favourites). Open a channel, then a day, to see its programmes. Open a programme for its description
-and **Record** (plus **Watch** while it is on). Programmes already set to record are marked ●. The
+and **Record** (plus **Watch** while it is on). Recording from the guide posts a notification to confirm it. Programmes already set to record are marked ● (the media panel keeps pages it has shown, so go up a level or reload to see a new ●). The
 guide is the TV's own, read from it on demand (cached for 10 minutes), so it covers what the TV's
 guide covers, usually about a week.
 

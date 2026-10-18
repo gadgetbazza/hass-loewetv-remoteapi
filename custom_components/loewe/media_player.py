@@ -5,6 +5,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.media_player import (
     BrowseError,
     BrowseMedia,
@@ -382,6 +383,19 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             channel=channel["locator"],
             start=dt_util.utc_from_timestamp(begin),
             end=dt_util.utc_from_timestamp(finish),
+        )
+        # The media panel gives no feedback and shows its cached page (without
+        # the ●) on Back, so confirm with a notification. One per TV: each
+        # recording set from the guide replaces the previous one.
+        programmes = await self.coordinator.async_get_guide(channel)
+        title = next((p["title"] for p in programmes if p["start"] == begin), "Recording")
+        start_at = dt_util.as_local(dt_util.utc_from_timestamp(begin))
+        end_at = dt_util.as_local(dt_util.utc_from_timestamp(finish))
+        persistent_notification.async_create(
+            self.hass,
+            f"{title}, {channel['name']}, {start_at:%a %d %b %H:%M}–{end_at:%H:%M}",
+            title=f"{state.name if (state := self.hass.states.get(self.entity_id)) else 'Loewe TV'}: recording set",
+            notification_id=f"loewe_record_{self.unique_id}",
         )
 
     # ---------- Recordings ----------
