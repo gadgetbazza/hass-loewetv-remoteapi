@@ -12,7 +12,8 @@ Custom integration for **Loewe Bild / SL420-era TVs** using the Loewe Remote API
 - Source selection (HDMI, AV, tuner etc)
 - Now playing: channel name, programme title, duration/progress and next programme (from the TV's EPG)
 - Optional programme artwork from [TMDB](https://www.themoviedb.org/) (see [Programme artwork](#programme-artwork))
-- State is `playing` while tuned to a TV channel, `on` for other inputs and `off` in standby
+- State is `playing` while tuned to a TV channel or playing a recording, `on` for other inputs and `off` in standby
+- **Playing a recording:** play, pause, stop, and fast-forward / rewind (HA's next / previous track; each press steps the speed up, play returns to normal speed). Content type `episode`. A recording started from HA's media browser also shows its title, channel and artwork; one started on the TV itself shows as "Recording", because the TV doesn't say which recording is playing. The TV doesn't report pause either, so `paused` is what HA last sent. Stop ends the recording and opens the TV's main menu over the input it was last on, as the remote's stop key does; the media player then reports that input
 - Media browser with **Favourites**, **All channels** and **Inputs**; select a channel to switch to it
 - **Recordings** in the media browser: the DR+ recorder's recordings (title, channel, date, length, thumbnail); select one to play it on the TV. Thumbnails are the [programme artwork](#programme-artwork) from TMDB when set up and matched; otherwise the TV's own thumbnail, a frame from the start that the TV only makes once the recording has been played
 - **Guide** in the media browser: about a week of programmes per channel from the TV's own guide, with **Record** (and **Watch** for what's on now) on each programme (see [Programme guide](#programme-guide))
@@ -33,6 +34,7 @@ Key names for `remote.send_command` (case-insensitive), or any numeric l2700 key
 | Colour keys | `red`, `green`, `yellow`, `blue` |
 | TV features | `epg`, `epg_star`, `ttx`, `recordings` (DR+ archive), `timer`, `tv_mode`, `radio_mode`, `radio`, `pip`, `pip_hash`, `pic`, `sound`, `aspect` |
 | Inputs | `hdmi1`–`hdmi4`, `av1`–`av3`, `avs`, `vga`, `comp`, `video`, `spdif_in` |
+| Recorder / player | `play`, `pause`, `stop`, `rewind` (`rew`), `fast_forward` (`ff`), `record` (`rec`). Sent in the TV's separate `l2700-hdr` key alphabet. They also work on live TV, where pause starts the TV's timeshift; the media player itself only offers transport controls for recordings, because during timeshift the TV still reports the live channel |
 
 Aliases: `volume_up`/`volume_down`, `channel_up`/`channel_down`, `guide` (epg), `select`/`enter` (ok), `home` (media), `exit` (end), `text`/`teletext` (ttx), `on_off` (power), `dr_archive` (recordings).
 

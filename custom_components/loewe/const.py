@@ -91,6 +91,27 @@ LOEWE_RC_ALIASES: dict[str, str] = {
 }
 
 
+RC_ALPHABET = "l2700"
+
+# Recorder (DR+) and player keys: a separate alphabet in the Remote API spec
+# (9.4.1.2), so they can't be sent as l2700 codes
+RC_ALPHABET_HDR = "l2700-hdr"
+LOEWE_HDR_CODES: dict[str, int] = {
+    "pause": 41,
+    "rewind": 50,
+    "fast_forward": 52,
+    "play": 53,
+    "stop": 54,
+    "record": 55,
+}
+LOEWE_HDR_ALIASES: dict[str, str] = {
+    "rew": "rewind",
+    "ff": "fast_forward",
+    "fastforward": "fast_forward",
+    "rec": "record",
+}
+
+
 def rc_code(name: str) -> int | None:
     """Return the l2700 key code for a key name, alias or numeric string, else None."""
     key = name.strip().lower()
@@ -98,6 +119,16 @@ def rc_code(name: str) -> int | None:
     if key in LOEWE_RC_CODES:
         return LOEWE_RC_CODES[key]
     return int(key) if key.isdigit() else None
+
+
+def rc_key(name: str) -> tuple[str, int] | None:
+    """Return (alphabet, code) for any key name or alias, l2700 or recorder, else None."""
+    key = name.strip().lower()
+    key = LOEWE_HDR_ALIASES.get(key, key)
+    if key in LOEWE_HDR_CODES:
+        return RC_ALPHABET_HDR, LOEWE_HDR_CODES[key]
+    code = rc_code(name)
+    return (RC_ALPHABET, code) if code is not None else None
 
 
 # Platforms supported by this integration

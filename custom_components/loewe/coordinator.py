@@ -18,6 +18,7 @@ from .const import (
     CONF_FCID,
     CONF_TMDB_API_KEY,
     LOEWE_RC_CODES,
+    RC_ALPHABET,
 )
 from .network import async_send_wol
 from .tmdb import TmdbArtwork
@@ -96,10 +97,14 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.current_locator: Optional[str] = None
         self.last_tv_locator: Optional[str] = None
         # GetCurrentPlayback's Mode ("drplus" while a recording plays), and the
-        # recording's title/artwork when HA started it (the TV doesn't say which)
+        # recording's locator/title/channel/artwork when HA started it (the TV
+        # doesn't say which), and whether it was paused from HA (nor that)
         self.playback_mode: Optional[str] = None
+        self.recording_locator: Optional[str] = None
         self.recording_title: Optional[str] = None
+        self.recording_channel: Optional[str] = None
         self.recording_artwork: Optional[str] = None
+        self.recording_paused = False
         self._device_info: dict[str, Any] = {}
         self.device_name: Optional[str] = None
         self._reachable = True
@@ -222,7 +227,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if playback:
             self.playback_mode = playback.get("Mode")
             if self.playback_mode != "drplus":
-                self.recording_title = self.recording_artwork = None
+                self.clear_recording()
 
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
@@ -383,17 +388,24 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.debug("SetMute success=%s", ok)
         return bool(ok)
 
-    async def async_inject_rc_key(self, value: int) -> bool:
+    def clear_recording(self) -> None:
+        """Forget the recording HA started (playback moved on to something else)."""
+        self.recording_locator = self.recording_title = None
+        self.recording_channel = self.recording_artwork = None
+        self.recording_paused = False
+
+    async def async_inject_rc_key(self, value: int, alphabet: str = RC_ALPHABET) -> bool:
         """Inject a remote control key press/release sequence.
 
-        Holding a key is not possible: on the TV tested, a press and a later
-        release still count as a single key press.
+        `alphabet` is "l2700" for the remote's keys, "l2700-hdr" for the
+        recorder and player keys. Holding a key is not possible: on the TV
+        tested, a press and a later release still count as a single key press.
         """
-        _LOGGER.debug("Sending RC key %s", value)
+        _LOGGER.debug("Sending RC key %s (%s)", value, alphabet)
         extra = (
             "<ltv:InputEventSequence>"
-            f'<ltv:RCKeyEvent alphabet="l2700" value="{value}" mode="press"/>'
-            f'<ltv:RCKeyEvent alphabet="l2700" value="{value}" mode="release"/>'
+            f'<ltv:RCKeyEvent alphabet="{alphabet}" value="{value}" mode="press"/>'
+            f'<ltv:RCKeyEvent alphabet="{alphabet}" value="{value}" mode="release"/>'
             "</ltv:InputEventSequence>"
         )
         resp = await self._safe_request("InjectRCKey", extra_xml=extra)
