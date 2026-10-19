@@ -34,7 +34,7 @@ Key names for `remote.send_command` (case-insensitive), or any numeric l2700 key
 | Colour keys | `red`, `green`, `yellow`, `blue` |
 | TV features | `epg`, `epg_star`, `ttx`, `recordings` (DR+ archive), `timer`, `tv_mode`, `radio_mode`, `radio`, `pip`, `pip_hash`, `pic`, `sound`, `aspect` |
 | Inputs | `hdmi1`–`hdmi4`, `av1`–`av3`, `avs`, `vga`, `comp`, `video`, `spdif_in` |
-| Recorder / player | `play`, `pause`, `stop`, `rewind` (`rew`), `fast_forward` (`ff`), `record` (`rec`). Sent in the TV's separate `l2700-hdr` key alphabet |
+| Recorder / player | `play`, `pause`, `stop`, `rewind` (`rew`), `fast_forward` (`ff`), `record` (`rec`). Sent in the TV's separate `l2700-hdr` key alphabet. They also work on live TV, where pause starts the TV's timeshift; the media player itself only offers transport controls for recordings, because during timeshift the TV still reports the live channel |
 
 Aliases: `volume_up`/`volume_down`, `channel_up`/`channel_down`, `guide` (epg), `select`/`enter` (ok), `home` (media), `exit` (end), `text`/`teletext` (ttx), `on_off` (power), `dr_archive` (recordings).
 
