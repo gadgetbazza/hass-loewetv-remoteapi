@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import rc_code
+from .const import rc_key
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,7 +56,8 @@ class LoeweTVRemote(CoordinatorEntity[LoeweTVCoordinator], RemoteEntity):
         await self.coordinator.async_request_refresh()
 
     async def async_send_command(self, command: Iterable[str], **kwargs: Any) -> None:
-        """Send RC keys by name or alias (see LOEWE_RC_CODES / LOEWE_RC_ALIASES) or numeric code.
+        """Send RC keys by name or alias (see LOEWE_RC_CODES / LOEWE_RC_ALIASES and
+        the recorder keys LOEWE_HDR_CODES / LOEWE_HDR_ALIASES) or numeric l2700 code.
 
         Honours num_repeats and delay_secs (between key presses). hold_secs is
         ignored: the TV treats a held key as a single press.
@@ -64,17 +65,17 @@ class LoeweTVRemote(CoordinatorEntity[LoeweTVCoordinator], RemoteEntity):
         num_repeats: int = kwargs.get("num_repeats", 1)
         delay_secs: float = kwargs.get("delay_secs", 0.5)
 
-        keys: list[tuple[str, int]] = []
+        keys: list[tuple[str, tuple[str, int]]] = []
         for cmd in [command] if isinstance(command, str) else command:
-            if (key := rc_code(cmd)) is None:
+            if (key := rc_key(cmd)) is None:
                 _LOGGER.warning("Invalid RC key: %s", cmd)
                 continue
             keys.append((cmd, key))
 
         # Each key is repeated num_repeats times before the next key (unchanged behaviour)
         presses = [key for key in keys for _ in range(num_repeats)]
-        for index, (cmd, key) in enumerate(presses):
+        for index, (cmd, (alphabet, code)) in enumerate(presses):
             if index and delay_secs:
                 await asyncio.sleep(delay_secs)
-            _LOGGER.debug("LoeweTV: Sending RC key %s (%s)", key, cmd)
-            await self.coordinator.async_inject_rc_key(key)
+            _LOGGER.debug("LoeweTV: Sending RC key %s/%s (%s)", alphabet, code, cmd)
+            await self.coordinator.async_inject_rc_key(code, alphabet)

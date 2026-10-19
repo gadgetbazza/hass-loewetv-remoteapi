@@ -27,6 +27,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 from homeassistant.util import slugify
 
+from .const import LOEWE_HDR_CODES, RC_ALPHABET_HDR
 from .coordinator import LoeweConfigEntry, LoeweTVCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -54,6 +55,25 @@ GUIDE_PREFIX = f"{BROWSE_GUIDE}/"
 RECORD_PREFIX = "record/"
 MEDIA_TYPE_RECORD = "loewe_record"
 
+BASE_FEATURES = (
+    MediaPlayerEntityFeature.TURN_ON
+    | MediaPlayerEntityFeature.TURN_OFF
+    | MediaPlayerEntityFeature.VOLUME_SET
+    | MediaPlayerEntityFeature.VOLUME_MUTE
+    | MediaPlayerEntityFeature.SELECT_SOURCE
+    | MediaPlayerEntityFeature.BROWSE_MEDIA
+    | MediaPlayerEntityFeature.PLAY_MEDIA
+)
+# While a recording plays. HA has no fast-forward/rewind actions, so next and
+# previous track send the recorder's FF and REW keys
+RECORDING_FEATURES = (
+    MediaPlayerEntityFeature.PLAY
+    | MediaPlayerEntityFeature.PAUSE
+    | MediaPlayerEntityFeature.STOP
+    | MediaPlayerEntityFeature.NEXT_TRACK
+    | MediaPlayerEntityFeature.PREVIOUS_TRACK
+)
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: LoeweConfigEntry, async_add_entities: AddEntitiesCallback
@@ -68,15 +88,6 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
     _attr_should_poll = False
     _attr_has_entity_name = True
     _attr_name = None  # the entity takes the device's name
-    _attr_supported_features = (
-        MediaPlayerEntityFeature.TURN_ON
-        | MediaPlayerEntityFeature.TURN_OFF
-        | MediaPlayerEntityFeature.VOLUME_SET
-        | MediaPlayerEntityFeature.VOLUME_MUTE
-        | MediaPlayerEntityFeature.SELECT_SOURCE
-        | MediaPlayerEntityFeature.BROWSE_MEDIA
-        | MediaPlayerEntityFeature.PLAY_MEDIA
-    )
 
     def __init__(self, coordinator: LoeweTVCoordinator, entry: LoeweConfigEntry) -> None:
         super().__init__(coordinator)
@@ -85,18 +96,38 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
         # Recording locator -> thumbnail URL (TMDB's, else the TV's), from the last Recordings listing
         self._recording_images: dict[str, str] = {}
         self._recording_titles: dict[str, str] = {}
+        self._recording_channels: dict[str, str] = {}
         # Recordings whose TV thumbnail exists: the TV makes one on first playback, and keeps it
         self._tv_thumbnails: set[str] = set()
 
     # ---------- State ----------
     @property
+    def _recording(self) -> bool:
+        """True while the TV is on and playing a DR+ recording."""
+        device = (self.coordinator.data or {}).get("device", {})
+        return (
+            device.get("ha_state") == MediaPlayerState.ON
+            and self.coordinator.playback_mode == "drplus"
+        )
+
+    @property
     def state(self) -> str:
-        """ON/OFF from the TV; PLAYING while it is on and tuned to a TV channel."""
+        """ON/OFF from the TV; PLAYING while it is on a TV channel or a recording.
+
+        The TV doesn't report a paused recording, so PAUSED is what HA last sent.
+        """
         device = (self.coordinator.data or {}).get("device", {})
         state = device.get("ha_state", STATE_UNKNOWN)
         if state == MediaPlayerState.ON and self._channel:
             return MediaPlayerState.PLAYING
+        if self._recording:
+            return MediaPlayerState.PAUSED if self.coordinator.recording_paused else MediaPlayerState.PLAYING
         return state
+
+    @property
+    def supported_features(self) -> MediaPlayerEntityFeature:
+        """Transport controls only while a recording plays."""
+        return BASE_FEATURES | RECORDING_FEATURES if self._recording else BASE_FEATURES
 
     @property
     def volume_level(self) -> float | None:
@@ -140,15 +171,22 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
 
     @property
     def media_content_type(self) -> str | None:
-        return MediaType.CHANNEL if self._channel else None
+        if self._channel:
+            return MediaType.CHANNEL
+        return MediaType.EPISODE if self._recording else None
 
     @property
     def media_content_id(self) -> str | None:
-        return self._channel["locator"] if self._channel else None
+        if self._channel:
+            return self._channel["locator"]
+        return self.coordinator.recording_locator if self._recording else None
 
     @property
     def media_channel(self) -> str | None:
-        return self._channel["name"] if self._channel else None
+        """The channel being watched, or the one a recording (started from HA) came from."""
+        if self._channel:
+            return self._channel["name"]
+        return self.coordinator.recording_channel if self._recording else None
 
     @property
     def media_title(self) -> str | None:
@@ -445,6 +483,7 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             rec["locator"]: image for rec, image in zip(recordings, images) if image
         }
         self._recording_titles = {rec["locator"]: rec["title"] for rec in recordings}
+        self._recording_channels = {rec["locator"]: rec["channel"] for rec in recordings if rec["channel"]}
         for rec in recordings:
             details = [rec["channel"]]
             if rec["start"] is not None:
@@ -518,8 +557,37 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             raise HomeAssistantError(f"Loewe TV did not switch to {media_id}")
         if locator.startswith(RECORDING_LOCATOR):
             # The TV reports only "a recording" while it plays; remember which
+            self.coordinator.clear_recording()
+            self.coordinator.recording_locator = locator
             self.coordinator.recording_title = self._recording_titles.get(locator)
+            self.coordinator.recording_channel = self._recording_channels.get(locator)
             self.coordinator.recording_artwork = self._recording_images.get(locator)
+
+    # ---------- Recording transport ----------
+    async def _async_recorder_key(self, key: str) -> None:
+        if not await self.coordinator.async_inject_rc_key(LOEWE_HDR_CODES[key], RC_ALPHABET_HDR):
+            raise HomeAssistantError(f"Loewe TV did not accept {key}")
+
+    async def async_media_play(self) -> None:
+        await self._async_recorder_key("play")
+        self.coordinator.recording_paused = False
+        self.async_write_ha_state()
+
+    async def async_media_pause(self) -> None:
+        await self._async_recorder_key("pause")
+        self.coordinator.recording_paused = True
+        self.async_write_ha_state()
+
+    async def async_media_stop(self) -> None:
+        await self._async_recorder_key("stop")
+
+    async def async_media_next_track(self) -> None:
+        """Fast-forward (each press steps the speed up on the TV; play resumes normal speed)."""
+        await self._async_recorder_key("fast_forward")
+
+    async def async_media_previous_track(self) -> None:
+        """Rewind (each press steps the speed up on the TV; play resumes normal speed)."""
+        await self._async_recorder_key("rewind")
 
     # ---------- Commands ----------
     def _set_optimistic(self, **device_changes: Any) -> None:
