@@ -562,6 +562,10 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
             self.coordinator.recording_title = self._recording_titles.get(locator)
             self.coordinator.recording_channel = self._recording_channels.get(locator)
             self.coordinator.recording_artwork = self._recording_images.get(locator)
+            # Show it now rather than at the next poll; the mode only reads
+            # "drplus" once the TV has switched, so publish an optimistic one
+            self.coordinator.playback_mode = "drplus"
+            self.async_write_ha_state()
 
     # ---------- Recording transport ----------
     async def _async_recorder_key(self, key: str) -> None:
