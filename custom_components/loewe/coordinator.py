@@ -48,6 +48,8 @@ POWER_ON_GRACE = 60
 # placeholder names (e.g. "#3055 1" for an input named "Apple TV"). Such a
 # list is fetched again, every AV_NAMES_RETRY seconds while the TV is on, up
 # to AV_NAMES_ATTEMPTS times (an input might genuinely keep such a name).
+# The count starts again at each power-on: once a round had run out, a list
+# with placeholders stayed that way through later power-ons until a restart.
 AV_NAMES_RETRY = 30
 AV_NAMES_ATTEMPTS = 10
 
@@ -118,6 +120,7 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._avlist_view: Optional[str] = None
         self._av_names_attempts = 0
         self._av_names_checked_at = 0.0
+        self._was_on = False
         self.current_channel: Optional[dict[str, str]] = None
         self.current_event: dict[str, Any] = {}
         self.next_event: dict[str, Any] = {}
@@ -188,8 +191,16 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         status = parsers.parse_status(status_resp)
         if not status:
             raise UpdateFailed("Loewe TV returned an empty status, even after re-pairing")
-        if status.get("ha_state") == MediaPlayerState.ON:
+        is_on = status.get("ha_state") == MediaPlayerState.ON
+        if is_on:
             self._last_on_at = time.monotonic()
+            if not self._was_on:
+                # Each power-on is a fresh boot that can hand out placeholder
+                # names again: give the retries a new round, the first one
+                # AV_NAMES_RETRY after it came on
+                self._av_names_attempts = 0
+                self._av_names_checked_at = time.monotonic()
+        self._was_on = is_on
 
         # After status is valid, ensure we have sources and channels
         if not self._sources_loaded:
