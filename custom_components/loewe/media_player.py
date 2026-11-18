@@ -224,10 +224,14 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
+        # Stable id of the AV input showing (e.g. "hdmi3"): its name follows the
+        # HDMI-CEC device plugged in, the port doesn't
+        port = self.coordinator.current_source_port
         if not self._channel:
-            return None
+            return {"source_port": port} if port else None
         nxt = (self.coordinator.data or {}).get("next_event") or {}
         return {
+            "source_port": port,
             "channel_number": self._channel.get("number"),
             "programme_description": self._event.get("info") or None,
             "next_programme": nxt.get("name"),
@@ -632,8 +636,15 @@ class LoeweTVMediaPlayer(CoordinatorEntity[LoeweTVCoordinator], MediaPlayerEntit
                 _LOGGER.warning("No TV channels available to zap to")
                 return
         else:
-            locator = next(
-                (src["locator"] for src in self.coordinator.available_sources if src["name"] == source),
+            sources = self.coordinator.available_sources
+            # By name, else by port id ("hdmi3"), which survives the TV renaming
+            # the input after the device plugged into it
+            locator = next((src["locator"] for src in sources if src["name"] == source), None) or next(
+                (
+                    src["locator"]
+                    for src in sources
+                    if self.coordinator.source_port(src["locator"]) == source.lower()
+                ),
                 None,
             )
             if not locator:
