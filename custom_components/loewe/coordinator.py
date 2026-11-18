@@ -363,6 +363,26 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return parsed GetDeviceData (chassis, software version, MACs, host name)."""
         return parsers.parse_device_data(await self._safe_request("GetDeviceData"))
 
+    @staticmethod
+    def source_port(locator: str) -> Optional[str]:
+        """Port id of an AV input from its locator ("channel://3:hdmi3:sl..." -> "hdmi3").
+
+        The TV renames an input after the HDMI-CEC device on it (an Xbox shows as
+        "XBOX"), so the name changes when the device is swapped; the port doesn't.
+        """
+        parts = locator.removeprefix("channel://").split(":")
+        return parts[1].lower() if len(parts) >= 3 and parts[1] else None
+
+    @property
+    def current_source_port(self) -> Optional[str]:
+        """Port id of the active AV input (e.g. "hdmi3"), or None when not on an AV input."""
+        loc = self.current_locator
+        if not loc or self.playback_mode == "drplus":
+            return None
+        if any(src["locator"] == loc for src in self.available_sources):
+            return self.source_port(loc)
+        return None
+
     @property
     def current_source_name(self) -> Optional[str]:
         """Name of the active input: an AV source name, "TV", "Recording", or None if unknown."""
