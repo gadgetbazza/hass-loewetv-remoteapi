@@ -52,6 +52,11 @@ POWER_ON_GRACE = 60
 # with placeholders stayed that way through later power-ons until a restart.
 AV_NAMES_RETRY = 30
 AV_NAMES_ATTEMPTS = 10
+# The TV names an AV input after the HDMI-CEC device on it, so the name changes
+# when the device is swapped (an Xbox for a Switch on HDMI 3). While an AV input
+# is showing, its names are read again when the input changes and then every
+# AV_NAMES_REFRESH seconds (one GetChannelList call).
+AV_NAMES_REFRESH = 60
 
 # Recording timers change rarely (and only from the TV's menu or our own
 # record action, which refreshes them at once), so they are polled slowly,
@@ -120,6 +125,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._avlist_view: Optional[str] = None
         self._av_names_attempts = 0
         self._av_names_checked_at = 0.0
+        self._av_names_refreshed_at = 0.0
+        self._av_names_locator: Optional[str] = None
         self._was_on = False
         self.current_channel: Optional[dict[str, str]] = None
         self.current_event: dict[str, Any] = {}
@@ -243,6 +250,8 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # --- Step 3: update cached state
         # GetCurrentStatus carries no locator; the active one comes from GetCurrentPlayback
         self.current_locator = playback.get("Locator") or self.current_locator
+        if status.get("ha_state") == MediaPlayerState.ON:
+            await self._async_refresh_av_names_on_input()
 
         # Now playing: only while the TV is actually on (standby still answers playback)
         if status.get("ha_state") == MediaPlayerState.ON:
@@ -558,6 +567,23 @@ class LoeweTVCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "Loaded %d AV sources, %d favourite channels, %d channels in total",
             len(self.available_sources), len(self.favourite_channels), len(self.all_channels),
         )
+
+    async def _async_refresh_av_names_on_input(self) -> None:
+        """Re-read the AV input names while one is showing (CEC renames, see AV_NAMES_REFRESH)."""
+        loc = self.current_locator
+        if not self._avlist_view or not loc or not self._is_av_locator(loc):
+            self._av_names_locator = None
+            return
+        if loc == self._av_names_locator and time.monotonic() - self._av_names_refreshed_at < AV_NAMES_REFRESH:
+            return
+        self._av_names_locator = loc
+        self._av_names_refreshed_at = time.monotonic()
+        sources = await self.async_get_channel_list(self._avlist_view)
+        # Keep the old list if the read failed or came back with boot placeholders
+        if sources and not self._has_placeholder_names(sources):
+            if [s["name"] for s in sources] != [s["name"] for s in self.available_sources]:
+                _LOGGER.debug("AV input names changed: %s", [s["name"] for s in sources])
+            self.available_sources = sources
 
     @staticmethod
     def _has_placeholder_names(sources: list[dict[str, str]]) -> bool:
